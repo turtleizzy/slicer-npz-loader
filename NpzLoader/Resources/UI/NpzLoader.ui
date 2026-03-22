@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>NpzLoader</class>
+ <widget class="QWidget" name="NpzLoader">
+  <layout class="QVBoxLayout" name="verticalLayout">
+
+   <!-- Section 1: Directory & File Selection -->
+   <item>
+    <widget class="ctkCollapsibleButton" name="fileSelectionCollapsible">
+     <property name="text"><string>Directory &amp; File Selection</string></property>
+     <layout class="QVBoxLayout" name="fileSelectionLayout">
+      <item>
+       <layout class="QFormLayout" name="dirFormLayout">
+        <item row="0" column="0">
+         <widget class="QLabel" name="directoryLabel">
+          <property name="text"><string>Root Directory:</string></property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <widget class="ctkPathLineEdit" name="directorySelector">
+          <property name="toolTip"><string>Select root directory containing NPZ/NPY files</string></property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QLabel" name="fileListLabel">
+        <property name="text"><string>NPZ/NPY Files:</string></property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QListWidget" name="fileList">
+        <property name="maximumSize">
+         <size><width>16777215</width><height>160</height></size>
+        </property>
+        <property name="toolTip"><string>Select a file to analyze and load</string></property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+
+   <!-- Section 2: NPZ Key Analysis & Load Plan -->
+   <item>
+    <widget class="ctkCollapsibleButton" name="loadPlanCollapsible">
+     <property name="text"><string>NPZ Key Analysis &amp; Load Plan</string></property>
+     <layout class="QVBoxLayout" name="loadPlanLayout">
+      <item>
+       <widget class="QLabel" name="keyInfoLabel">
+        <property name="text"><string>Detected Keys:</string></property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QTableWidget" name="keyInfoTable">
+        <property name="maximumSize">
+         <size><width>16777215</width><height>140</height></size>
+        </property>
+        <property name="editTriggers">
+         <set>QAbstractItemView::NoEditTriggers</set>
+        </property>
+        <property name="selectionMode">
+         <enum>QAbstractItemView::NoSelection</enum>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="loadPlanLabel">
+        <property name="text"><string>Load Plan (check groups to load, edit key mappings):</string></property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QTreeWidget" name="loadPlanTree">
+        <property name="minimumSize">
+         <size><width>0</width><height>160</height></size>
+        </property>
+        <property name="toolTip"><string>Configure which data to load and key mappings</string></property>
+       </widget>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="groupButtonLayout">
+        <item>
+         <widget class="QPushButton" name="addGroupButton">
+          <property name="text"><string>Add Group</string></property>
+          <property name="toolTip"><string>Add a new load plan group</string></property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="removeGroupButton">
+          <property name="text"><string>Remove Group</string></property>
+          <property name="toolTip"><string>Remove the selected load plan group</string></property>
+         </widget>
+        </item>
+        <item>
+         <spacer name="groupButtonSpacer">
+          <property name="orientation"><enum>Qt::Horizontal</enum></property>
+         </spacer>
+        </item>
+       </layout>
+      </item>
+     </layout>
+    </widget>
+   </item>
+
+   <!-- Section 3: Load Actions -->
+   <item>
+    <widget class="ctkCollapsibleButton" name="loadActionsCollapsible">
+     <property name="text"><string>Load Actions</string></property>
+     <layout class="QVBoxLayout" name="loadActionsLayout">
+      <item>
+       <layout class="QHBoxLayout" name="actionButtonLayout">
+        <item>
+         <widget class="QPushButton" name="loadButton">
+          <property name="text"><string>Load</string></property>
+          <property name="toolTip"><string>Load enabled plan groups into the scene</string></property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="closeButton">
+          <property name="text"><string>Close / Clear</string></property>
+          <property name="toolTip"><string>Remove all nodes loaded from the current file</string></property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QLabel" name="statusLabel">
+        <property name="text"><string>No file loaded.</string></property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+
+   <!-- Section 4: Settings -->
+   <item>
+    <widget class="ctkCollapsibleButton" name="settingsCollapsible">
+     <property name="text"><string>Settings</string></property>
+     <property name="collapsed"><bool>true</bool></property>
+     <layout class="QVBoxLayout" name="settingsLayout">
+      <item>
+       <widget class="QCheckBox" name="autoDetectCheckBox">
+        <property name="text"><string>Auto-detect load plan for each file</string></property>
+        <property name="checked"><bool>true</bool></property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QCheckBox" name="reuseplanCheckBox">
+        <property name="text"><string>Reuse last load plan for files with matching keys</string></property>
+        <property name="checked"><bool>true</bool></property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+
+  </layout>
+ </widget>
+</ui>
