@@ -159,8 +159,8 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         addShortcut("F1", lambda: self._onWindowLevelShortcut("F1"))
         addShortcut("F2", lambda: self._onWindowLevelShortcut("F2"))
         addShortcut("F3", lambda: self._onWindowLevelShortcut("F3"))
-        addShortcut("T", self._toggleLatestSegmentationDisplayMode)
-        addShortcut("Shift+T", self._toggleAllSegmentationsDisplayMode)
+        addShortcut("T", self._toggleLoadedSegmentationsDisplayMode)
+        addShortcut("Shift+T", self._toggleSceneSegmentationsDisplayMode)
 
     @staticmethod
     def _isModuleActive() -> bool:
@@ -248,35 +248,41 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
             displayNode.SetVisibility2DFill(False)
             displayNode.SetVisibility2DOutline(False)
 
-    def _toggleLatestSegmentationDisplayMode(self):
+    def _toggleLoadedSegmentationsDisplayMode(self):
         if not self._isModuleActive():
             return
         if not self._loadedSegmentationNodeIds:
-            return
-        segNode = slicer.mrmlScene.GetNodeByID(self._loadedSegmentationNodeIds[-1])
-        if not segNode:
             return
         self._segSingleModeIndex = (self._segSingleModeIndex + 1) % 3
-        self._applySegDisplayMode(segNode, self._segSingleModeIndex)
         modeName = ["fill", "contour", "hide"][self._segSingleModeIndex]
-        self.ui.statusLabel.text = f"Latest segmentation display mode: {modeName}"
-
-    def _toggleAllSegmentationsDisplayMode(self):
-        if not self._isModuleActive():
-            return
-        if not self._loadedSegmentationNodeIds:
-            return
-        self._segAllModeIndex = (self._segAllModeIndex + 1) % 3
-        modeName = ["fill", "contour", "hide"][self._segAllModeIndex]
         count = 0
         for nodeId in self._loadedSegmentationNodeIds:
             segNode = slicer.mrmlScene.GetNodeByID(nodeId)
             if not segNode:
                 continue
+            self._applySegDisplayMode(segNode, self._segSingleModeIndex)
+            count += 1
+        if count > 0:
+            self.ui.statusLabel.text = (
+                f"Loaded segmentations display mode: {modeName} ({count} nodes)"
+            )
+
+    def _toggleSceneSegmentationsDisplayMode(self):
+        if not self._isModuleActive():
+            return
+        allSegNodes = slicer.util.getNodesByClass("vtkMRMLSegmentationNode")
+        if not allSegNodes:
+            return
+        self._segAllModeIndex = (self._segAllModeIndex + 1) % 3
+        modeName = ["fill", "contour", "hide"][self._segAllModeIndex]
+        count = 0
+        for segNode in allSegNodes:
             self._applySegDisplayMode(segNode, self._segAllModeIndex)
             count += 1
         if count > 0:
-            self.ui.statusLabel.text = f"All segmentations display mode: {modeName} ({count} nodes)"
+            self.ui.statusLabel.text = (
+                f"All scene segmentations display mode: {modeName} ({count} nodes)"
+            )
 
     # ---- Directory & file list ---------------------------------------------
 
@@ -548,8 +554,11 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
     # ---- Key analysis ------------------------------------------------------
 
     _VOLUME_PATTERN = re.compile(r"^(img|vol|volume|image)$", re.IGNORECASE)
-    _SPACING_PATTERN = re.compile(r"^spacing$", re.IGNORECASE)
-    _ORIGIN_PATTERN = re.compile(r"^origin$", re.IGNORECASE)
+    # Accept both prefix/suffix forms:
+    # - origin* or *origin
+    # - spacing* or *spacing
+    _SPACING_PATTERN = re.compile(r"(^spacing|spacing$)", re.IGNORECASE)
+    _ORIGIN_PATTERN = re.compile(r"(^origin|origin$)", re.IGNORECASE)
     _SEG_PATTERN = re.compile(r"(^seg|seg$)", re.IGNORECASE)
     _SPARSE_IND_PATTERN = re.compile(r"(?:^|_)(inds?)$", re.IGNORECASE)
     _SPARSE_COLOR_PATTERN = re.compile(r"color_point|color_points|colorpoint|colorpoints", re.IGNORECASE)
