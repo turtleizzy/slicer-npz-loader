@@ -9,6 +9,7 @@ import numpy as np
 import numpy.lib.format as npyfmt
 import qt
 import slicer
+from SliceViewingTool import ensureGlobalSliceViewingTool, getGlobalSliceViewingTool
 from slicer.ScriptedLoadableModule import (
     ScriptedLoadableModule,
     ScriptedLoadableModuleLogic,
@@ -34,6 +35,7 @@ class NpzLoader(ScriptedLoadableModule):
             "Supports labelmap and sparse-index segmentation formats."
         )
         self.parent.acknowledgementText = ""
+        ensureGlobalSliceViewingTool(os.path.dirname(__file__))
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +76,7 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         self._segSingleModeIndex = 0
         self._segAllModeIndex = 0
         self._shortcuts: list[qt.QShortcut] = []
+        self._sliceViewingTool = None
 
     # ---- setup -------------------------------------------------------------
 
@@ -112,6 +115,7 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
 
         self.layout.addStretch(1)
         self._setupShortcuts()
+        self._setupSliceTool()
 
         # Populate if a directory was restored from settings
         if self.ui.directorySelector.currentPath:
@@ -121,6 +125,9 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         for shortcut in self._shortcuts:
             shortcut.disconnect("activated()")
         self._shortcuts.clear()
+        if self._sliceViewingTool:
+            self._sliceViewingTool.status_callback = None
+            self._sliceViewingTool = None
 
     # ---- shortcut settings -------------------------------------------------
 
@@ -161,6 +168,20 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         addShortcut("F3", lambda: self._onWindowLevelShortcut("F3"))
         addShortcut("T", self._toggleLoadedSegmentationsDisplayMode)
         addShortcut("Shift+T", self._toggleSceneSegmentationsDisplayMode)
+        addShortcut("S", self._toggleSliceDragTool)
+
+    def _setupSliceTool(self):
+        moduleDir = os.path.dirname(__file__)
+        ensureGlobalSliceViewingTool(moduleDir)
+        self._sliceViewingTool = getGlobalSliceViewingTool()
+        if self._sliceViewingTool:
+            self._sliceViewingTool.status_callback = (
+                lambda text: setattr(self.ui.statusLabel, "text", text)
+            )
+
+    def _toggleSliceDragTool(self):
+        if self._sliceViewingTool:
+            self._sliceViewingTool.toggle()
 
     @staticmethod
     def _isModuleActive() -> bool:
@@ -501,6 +522,8 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         self.logic.stickyPlans[signature] = self.logic.clonePlanGroups(self._loadPlanGroups)
 
         self.ui.statusLabel.text = f"Loaded: {baseName} ({len(self._loadedNodeIds)} nodes)"
+        if self._sliceViewingTool:
+            self._sliceViewingTool.onDataLoaded()
 
     def onClose(self):
         self._clearNodes()
