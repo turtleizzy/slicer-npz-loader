@@ -39,7 +39,17 @@ It is designed for quick inspection workflows where data is produced by Python p
 
 ## Installation
 
-## Option 1: Build as a Slicer extension (CMake)
+## Option 1 (Simplest): Clone and drag into Slicer
+
+1. Clone this repository:
+   - `git clone https://github.com/turtleizzy/slicer-npz-loader.git`
+2. Open 3D Slicer.
+3. Drag the cloned project folder (or the `NpzLoader` module folder) into the Slicer window.
+4. Confirm adding/loading the scripted module, then restart/reload if Slicer prompts.
+
+This is the fastest way to start using the module locally for development and testing.
+
+## Option 2: Build as a Slicer extension (CMake)
 
 1. Clone this repository.
 2. Configure and build with CMake against your Slicer build/environment.
@@ -50,7 +60,7 @@ Top-level CMake metadata:
 - Category: `Informatics`
 - Homepage: <https://github.com/turtleizzy/slicer-npz-loader>
 
-## Option 2: Developer workflow (scripted module iteration)
+## Option 3: Developer workflow (scripted module iteration)
 
 If you are developing the module, place this repository where Slicer can load scripted extension modules, or build in your local Slicer extension workflow and restart/reload as needed.
 
