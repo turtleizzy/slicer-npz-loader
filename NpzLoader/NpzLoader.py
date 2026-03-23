@@ -1,4 +1,3 @@
-import logging
 import os
 import re
 import zipfile
@@ -10,7 +9,6 @@ import numpy as np
 import numpy.lib.format as npyfmt
 import qt
 import slicer
-import vtk
 from slicer.ScriptedLoadableModule import (
     ScriptedLoadableModule,
     ScriptedLoadableModuleLogic,
@@ -70,7 +68,12 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         self._currentKeys: list[KeyInfo] = []
         self._loadPlanGroups: list[LoadPlanGroup] = []
         self._loadedNodeIds: list[str] = []
+        self._loadedVolumeNodeIds: list[str] = []
+        self._loadedSegmentationNodeIds: list[str] = []
         self._currentFilePath: Optional[str] = None
+        self._segSingleModeIndex = 0
+        self._segAllModeIndex = 0
+        self._shortcuts: list[qt.QShortcut] = []
 
     # ---- setup -------------------------------------------------------------
 
@@ -102,15 +105,178 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         # --- Section 4: Settings ---
         self.ui.autoDetectCheckBox.checked = True
         self.ui.reuseplanCheckBox.checked = True
+        self._loadShortcutSettings()
+        self.ui.wlPresetF1LineEdit.connect("editingFinished()", self._saveShortcutSettings)
+        self.ui.wlPresetF2LineEdit.connect("editingFinished()", self._saveShortcutSettings)
+        self.ui.wlPresetF3LineEdit.connect("editingFinished()", self._saveShortcutSettings)
 
         self.layout.addStretch(1)
+        self._setupShortcuts()
 
         # Populate if a directory was restored from settings
         if self.ui.directorySelector.currentPath:
             self.onDirectoryChanged(self.ui.directorySelector.currentPath)
 
     def cleanup(self):
-        pass
+        for shortcut in self._shortcuts:
+            shortcut.disconnect("activated()")
+        self._shortcuts.clear()
+
+    # ---- shortcut settings -------------------------------------------------
+
+    @staticmethod
+    def _defaultWlPresetStrings() -> dict[str, str]:
+        return {
+            "F1": "400,40",
+            "F2": "1500,-600",
+            "F3": "2500,500",
+        }
+
+    def _loadShortcutSettings(self):
+        settings = qt.QSettings()
+        defaults = self._defaultWlPresetStrings()
+        self.ui.wlPresetF1LineEdit.text = settings.value("NpzLoader/WLPresetF1", defaults["F1"])
+        self.ui.wlPresetF2LineEdit.text = settings.value("NpzLoader/WLPresetF2", defaults["F2"])
+        self.ui.wlPresetF3LineEdit.text = settings.value("NpzLoader/WLPresetF3", defaults["F3"])
+
+    def _saveShortcutSettings(self):
+        settings = qt.QSettings()
+        settings.setValue("NpzLoader/WLPresetF1", self.ui.wlPresetF1LineEdit.text.strip())
+        settings.setValue("NpzLoader/WLPresetF2", self.ui.wlPresetF2LineEdit.text.strip())
+        settings.setValue("NpzLoader/WLPresetF3", self.ui.wlPresetF3LineEdit.text.strip())
+
+    def _setupShortcuts(self):
+        mainWindow = slicer.util.mainWindow()
+        if not mainWindow:
+            return
+
+        def addShortcut(key, callback):
+            sc = qt.QShortcut(qt.QKeySequence(key), mainWindow)
+            sc.setContext(qt.Qt.ApplicationShortcut)
+            sc.connect("activated()", callback)
+            self._shortcuts.append(sc)
+
+        addShortcut("F1", lambda: self._onWindowLevelShortcut("F1"))
+        addShortcut("F2", lambda: self._onWindowLevelShortcut("F2"))
+        addShortcut("F3", lambda: self._onWindowLevelShortcut("F3"))
+        addShortcut("T", self._toggleLatestSegmentationDisplayMode)
+        addShortcut("Shift+T", self._toggleAllSegmentationsDisplayMode)
+
+    @staticmethod
+    def _isModuleActive() -> bool:
+        mainWindow = slicer.util.mainWindow()
+        if not mainWindow:
+            return False
+        moduleSelector = mainWindow.moduleSelector()
+        if not moduleSelector:
+            return False
+        selectedModule = None
+        if hasattr(moduleSelector, "selectedModule"):
+            selectedModule = moduleSelector.selectedModule
+        elif hasattr(moduleSelector, "selectedModuleName"):
+            selectedModule = moduleSelector.selectedModuleName
+        return selectedModule == "NpzLoader"
+
+    @staticmethod
+    def _parseWlPreset(text: str) -> Optional[tuple[float, float]]:
+        parts = [p.strip() for p in text.split(",")]
+        if len(parts) != 2:
+            return None
+        try:
+            return float(parts[0]), float(parts[1])
+        except ValueError:
+            return None
+
+    def _onWindowLevelShortcut(self, presetKey: str):
+        if not self._isModuleActive():
+            return
+        if presetKey == "F1":
+            presetText = self.ui.wlPresetF1LineEdit.text
+        elif presetKey == "F2":
+            presetText = self.ui.wlPresetF2LineEdit.text
+        else:
+            presetText = self.ui.wlPresetF3LineEdit.text
+
+        wl = self._parseWlPreset(presetText)
+        if wl is None:
+            slicer.util.warningDisplay(
+                f"Invalid {presetKey} preset format. Use 'window,level' (e.g. 400,40)."
+            )
+            return
+        self._applyWindowLevelToLoadedVolumes(*wl)
+
+    def _applyWindowLevelToLoadedVolumes(self, window: float, level: float):
+        appliedCount = 0
+        for nodeId in self._loadedVolumeNodeIds:
+            volumeNode = slicer.mrmlScene.GetNodeByID(nodeId)
+            if not volumeNode:
+                continue
+            displayNode = volumeNode.GetDisplayNode()
+            if not displayNode:
+                volumeNode.CreateDefaultDisplayNodes()
+                displayNode = volumeNode.GetDisplayNode()
+            if not displayNode:
+                continue
+            displayNode.AutoWindowLevelOff()
+            displayNode.SetWindow(window)
+            displayNode.SetLevel(level)
+            appliedCount += 1
+
+        if appliedCount > 0:
+            self.ui.statusLabel.text = (
+                f"Applied WL preset: window={window:g}, level={level:g} "
+                f"to {appliedCount} volume(s)"
+            )
+
+    @staticmethod
+    def _applySegDisplayMode(segNode, modeIndex: int):
+        displayNode = segNode.GetDisplayNode()
+        if not displayNode:
+            segNode.CreateDefaultDisplayNodes()
+            displayNode = segNode.GetDisplayNode()
+        if not displayNode:
+            return
+
+        # 0=fill, 1=contour, 2=hide
+        if modeIndex == 0:
+            displayNode.SetVisibility2DFill(True)
+            displayNode.SetVisibility2DOutline(False)
+        elif modeIndex == 1:
+            displayNode.SetVisibility2DFill(False)
+            displayNode.SetVisibility2DOutline(True)
+        else:
+            displayNode.SetVisibility2DFill(False)
+            displayNode.SetVisibility2DOutline(False)
+
+    def _toggleLatestSegmentationDisplayMode(self):
+        if not self._isModuleActive():
+            return
+        if not self._loadedSegmentationNodeIds:
+            return
+        segNode = slicer.mrmlScene.GetNodeByID(self._loadedSegmentationNodeIds[-1])
+        if not segNode:
+            return
+        self._segSingleModeIndex = (self._segSingleModeIndex + 1) % 3
+        self._applySegDisplayMode(segNode, self._segSingleModeIndex)
+        modeName = ["fill", "contour", "hide"][self._segSingleModeIndex]
+        self.ui.statusLabel.text = f"Latest segmentation display mode: {modeName}"
+
+    def _toggleAllSegmentationsDisplayMode(self):
+        if not self._isModuleActive():
+            return
+        if not self._loadedSegmentationNodeIds:
+            return
+        self._segAllModeIndex = (self._segAllModeIndex + 1) % 3
+        modeName = ["fill", "contour", "hide"][self._segAllModeIndex]
+        count = 0
+        for nodeId in self._loadedSegmentationNodeIds:
+            segNode = slicer.mrmlScene.GetNodeByID(nodeId)
+            if not segNode:
+                continue
+            self._applySegDisplayMode(segNode, self._segAllModeIndex)
+            count += 1
+        if count > 0:
+            self.ui.statusLabel.text = f"All segmentations display mode: {modeName} ({count} nodes)"
 
     # ---- Directory & file list ---------------------------------------------
 
@@ -269,6 +435,8 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
 
         # Clear previously loaded nodes before loading new ones
         self._clearNodes()
+        self._segSingleModeIndex = 0
+        self._segAllModeIndex = 0
 
         baseName = os.path.splitext(os.path.basename(self._currentFilePath))[0]
 
@@ -290,6 +458,7 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
                         npzData, group, baseName
                     )
                     self._loadedNodeIds.extend(nodeIds)
+                    self._loadedVolumeNodeIds.extend(nodeIds)
                     if volumeShape is None:
                         volumeShape = vShape
                         volumeSpacing = vSpacing
@@ -305,6 +474,7 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
                         npzData, group, baseName, volumeShape, volumeSpacing, volumeOrigin
                     )
                     self._loadedNodeIds.extend(nodeIds)
+                    self._loadedSegmentationNodeIds.extend(nodeIds)
                 except Exception as e:
                     slicer.util.errorDisplay(f"Error loading seg '{group.name}':\n{e}")
             elif group.group_type == "seg_sparse":
@@ -313,6 +483,7 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
                         npzData, group, baseName, volumeShape, volumeSpacing, volumeOrigin
                     )
                     self._loadedNodeIds.extend(nodeIds)
+                    self._loadedSegmentationNodeIds.extend(nodeIds)
                 except Exception as e:
                     slicer.util.errorDisplay(f"Error loading sparse seg '{group.name}':\n{e}")
 
@@ -335,6 +506,8 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
             if node:
                 slicer.mrmlScene.RemoveNode(node)
         self._loadedNodeIds.clear()
+        self._loadedVolumeNodeIds.clear()
+        self._loadedSegmentationNodeIds.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -599,7 +772,7 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
         # I and J negated → compensate X and Y; K unchanged → no Z shift.
         # shape[2]=I extent, shape[1]=J extent, shape[0]=K extent.
         adjusted_origin = (
-            origin_xyz[0], # + (shape[2] - 1) * spacing_xyz[0],
+            origin_xyz[0], # + (shape[2] - 1) * spacing_xyz[0
             origin_xyz[1], # + (shape[1] - 1) * spacing_xyz[1],
             origin_xyz[2],
         )
