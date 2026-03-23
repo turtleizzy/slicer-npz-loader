@@ -1,11 +1,13 @@
 import logging
 import os
 import re
+import zipfile
 from dataclasses import dataclass, field
 from typing import Optional
 
 import ctk
 import numpy as np
+import numpy.lib.format as npyfmt
 import qt
 import slicer
 import vtk
@@ -379,21 +381,38 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
     _SPARSE_IND_PATTERN = re.compile(r"(?:^|_)(inds?)$", re.IGNORECASE)
     _SPARSE_COLOR_PATTERN = re.compile(r"color_point|color_points|colorpoint|colorpoints", re.IGNORECASE)
 
+    @staticmethod
+    def _readNpyHeaderShapeDtype(fileobj) -> tuple[tuple, str]:
+        """Read only the .npy header (magic + dict); does not read array data."""
+        version = npyfmt.read_magic(fileobj)
+        if version == (1, 0):
+            shape, _fortran, dtype = npyfmt.read_array_header_1_0(fileobj)
+        elif version == (2, 0):
+            shape, _fortran, dtype = npyfmt.read_array_header_2_0(fileobj)
+        elif version == (3, 0):
+            shape, _fortran, dtype = npyfmt._read_array_header(fileobj, version)
+        else:
+            raise ValueError(f"Unsupported numpy .npy format version {version}")
+        return tuple(shape), str(dtype)
+
     def analyzeNpzKeys(self, filePath: str) -> list[KeyInfo]:
+        """Classify arrays using only each member's .npy header (no full array I/O)."""
         ext = os.path.splitext(filePath)[1].lower()
         if ext == ".npy":
-            arr = np.load(filePath, allow_pickle=False)
-            return [KeyInfo(name="data", shape=arr.shape, dtype=str(arr.dtype), role="volume")]
+            with open(filePath, "rb") as f:
+                shape, dtype = self._readNpyHeaderShapeDtype(f)
+            return [KeyInfo(name="data", shape=shape, dtype=dtype, role="volume")]
 
-        npz = np.load(filePath, allow_pickle=False)
         keys: list[KeyInfo] = []
-        for name in npz.files:
-            arr = npz[name]
-            shape = arr.shape
-            dtype = str(arr.dtype)
-            role = self._classifyKey(name, shape, dtype)
-            keys.append(KeyInfo(name=name, shape=shape, dtype=dtype, role=role))
-        npz.close()
+        with zipfile.ZipFile(filePath, "r") as zf:
+            for member in sorted(zf.namelist()):
+                if not member.endswith(".npy"):
+                    continue
+                array_key = os.path.splitext(os.path.basename(member))[0]
+                with zf.open(member, "r") as raw:
+                    shape, dtype = self._readNpyHeaderShapeDtype(raw)
+                role = self._classifyKey(array_key, shape, dtype)
+                keys.append(KeyInfo(name=array_key, shape=shape, dtype=dtype, role=role))
         return keys
 
     def _classifyKey(self, name: str, shape: tuple, dtype: str) -> str:
@@ -580,8 +599,8 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
         # I and J negated → compensate X and Y; K unchanged → no Z shift.
         # shape[2]=I extent, shape[1]=J extent, shape[0]=K extent.
         adjusted_origin = (
-            origin_xyz[0] + (shape[2] - 1) * spacing_xyz[0],
-            origin_xyz[1] + (shape[1] - 1) * spacing_xyz[1],
+            origin_xyz[0], # + (shape[2] - 1) * spacing_xyz[0],
+            origin_xyz[1], # + (shape[1] - 1) * spacing_xyz[1],
             origin_xyz[2],
         )
         node.SetOrigin(*adjusted_origin)
