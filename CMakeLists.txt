@@ -4,9 +4,9 @@ project(NpzLoader)
 
 #-----------------------------------------------------------------------------
 # Extension meta-information
-set(EXTENSION_HOMEPAGE "https://github.com/example/slicer-npz-loader")
+set(EXTENSION_HOMEPAGE "https://github.com/turtleizzy/slicer-npz-loader")
 set(EXTENSION_CATEGORY "Informatics")
-set(EXTENSION_CONTRIBUTORS "NpzLoader Contributors")
+set(EXTENSION_CONTRIBUTORS "TurtleIzzy")
 set(EXTENSION_DESCRIPTION "Load volume and segmentation data from NPZ/NPY files into 3D Slicer.")
 set(EXTENSION_ICONURL "")
 set(EXTENSION_SCREENSHOTURLS "")
