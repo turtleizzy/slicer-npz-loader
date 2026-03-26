@@ -731,6 +731,31 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         else:
             self._loadCurrentPairedItem()
 
+    def _center3DViewsAfterLoad(self):
+        # Try the utility API first, then fall back to per-view reset.
+        try:
+            if hasattr(slicer.util, "resetThreeDViews"):
+                slicer.util.resetThreeDViews()
+                return
+        except Exception:
+            pass
+
+        layoutManager = slicer.app.layoutManager()
+        if not layoutManager:
+            return
+
+        for viewIndex in range(layoutManager.threeDViewCount):
+            threeDWidget = layoutManager.threeDWidget(viewIndex)
+            if not threeDWidget:
+                continue
+            threeDView = threeDWidget.threeDView()
+            if not threeDView:
+                continue
+            try:
+                threeDView.resetFocalPoint()
+            except Exception:
+                pass
+
     def _loadCurrentNpzItem(self):
         if not self._currentDataItem or not self._currentDataItem.npz_path:
             slicer.util.warningDisplay("No NPZ/NPY item selected.")
@@ -807,6 +832,7 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         self.ui.statusLabel.text = f"Loaded: {baseName} ({len(self._loadedNodeIds)} nodes)"
         if self._sliceViewingTool:
             self._sliceViewingTool.onDataLoaded()
+        self._center3DViewsAfterLoad()
 
     def _loadCurrentPairedItem(self):
         if not self._currentDataItem:
@@ -849,6 +875,7 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         )
         if self._sliceViewingTool:
             self._sliceViewingTool.onDataLoaded()
+        self._center3DViewsAfterLoad()
 
     def onClose(self):
         self._clearNodes()
