@@ -406,11 +406,28 @@ class SliceViewingToolController:
                 and not self.middleDown):
             try:
                 xy = interactor.GetEventPosition()
-                xyz = sliceWidget.sliceView().convertDeviceToXYZ(xy)
-                ras = sliceWidget.sliceView().convertXYZToRAS(xyz)
+                ras = sliceWidget.sliceView().convertXYZToRAS(
+                    sliceWidget.sliceView().convertDeviceToXYZ(xy)
+                )
                 crosshairNode = slicer.mrmlScene.GetFirstNodeByClass("vtkMRMLCrosshairNode")
                 if crosshairNode:
-                    crosshairNode.SetCrosshairRAS(float(ras[0]), float(ras[1]), float(ras[2]))
+                    r, a, s = float(ras[0]), float(ras[1]), float(ras[2])
+                    crosshairNode.SetCrosshairRAS(r, a, s)
+                    # Crosshair alone only moves the intersection lines; updating slice
+                    # planes requires JumpAllSlices (see Slicer script repository / gui.md).
+                    sliceNodeClass = slicer.vtkMRMLSliceNode
+                    jump_mode = getattr(
+                        sliceNodeClass,
+                        "DefaultJumpSlice",
+                        -1,
+                    )
+                    sliceNodeClass.JumpAllSlices(
+                        slicer.mrmlScene,
+                        r,
+                        a,
+                        s,
+                        jump_mode,
+                    )
                     return True
             except Exception:
                 pass

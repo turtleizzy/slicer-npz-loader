@@ -108,6 +108,13 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         # --- Section 4: Settings ---
         self.ui.autoDetectCheckBox.checked = True
         self.ui.reuseplanCheckBox.checked = True
+        self._loadFloatSegSettings()
+        self.ui.floatSegAutoThresholdCheckBox.connect(
+            "toggled(bool)", self._onFloatSegAutoThresholdToggled
+        )
+        self.ui.floatSegThresholdDoubleSpinBox.connect(
+            "valueChanged(double)", self._onFloatSegThresholdChanged
+        )
         self._loadShortcutSettings()
         self.ui.wlPresetF1LineEdit.connect("editingFinished()", self._saveShortcutSettings)
         self.ui.wlPresetF2LineEdit.connect("editingFinished()", self._saveShortcutSettings)
@@ -151,6 +158,52 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         settings.setValue("NpzLoader/WLPresetF1", self.ui.wlPresetF1LineEdit.text.strip())
         settings.setValue("NpzLoader/WLPresetF2", self.ui.wlPresetF2LineEdit.text.strip())
         settings.setValue("NpzLoader/WLPresetF3", self.ui.wlPresetF3LineEdit.text.strip())
+
+    @staticmethod
+    def _toBool(value) -> bool:
+        # qt.QSettings may return QVariant / string depending on PythonQt build.
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
+
+    def _loadFloatSegSettings(self):
+        settings = qt.QSettings()
+        autoThresholdVal = settings.value("NpzLoader/FloatSegAutoThreshold", True)
+        thresholdVal = settings.value("NpzLoader/FloatSegThreshold", 0.5)
+
+        self.ui.floatSegAutoThresholdCheckBox.checked = self._toBool(autoThresholdVal)
+        self.ui.floatSegThresholdDoubleSpinBox.value = float(thresholdVal)
+        self.ui.floatSegThresholdDoubleSpinBox.setEnabled(
+            self.ui.floatSegAutoThresholdCheckBox.checked
+        )
+
+        # Sync to logic
+        if self.logic:
+            self.logic.floatSegAutoThreshold = self.ui.floatSegAutoThresholdCheckBox.checked
+            self.logic.floatSegThreshold = float(self.ui.floatSegThresholdDoubleSpinBox.value)
+
+    def _saveFloatSegSettings(self):
+        settings = qt.QSettings()
+        settings.setValue(
+            "NpzLoader/FloatSegAutoThreshold",
+            bool(self.ui.floatSegAutoThresholdCheckBox.checked),
+        )
+        settings.setValue(
+            "NpzLoader/FloatSegThreshold",
+            float(self.ui.floatSegThresholdDoubleSpinBox.value),
+        )
+
+        # Sync to logic
+        if self.logic:
+            self.logic.floatSegAutoThreshold = bool(self.ui.floatSegAutoThresholdCheckBox.checked)
+            self.logic.floatSegThreshold = float(self.ui.floatSegThresholdDoubleSpinBox.value)
+
+    def _onFloatSegAutoThresholdToggled(self, _checked: bool):
+        self.ui.floatSegThresholdDoubleSpinBox.setEnabled(_checked)
+        self._saveFloatSegSettings()
+
+    def _onFloatSegThresholdChanged(self, _value: float):
+        self._saveFloatSegSettings()
 
     def _setupShortcuts(self):
         mainWindow = slicer.util.mainWindow()
@@ -407,22 +460,36 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
     def onAddGroup(self):
         dialog = qt.QDialog(slicer.util.mainWindow())
         dialog.setWindowTitle("Add Load Plan Group")
-        layout = qt.QFormLayout(dialog)
+        dialog.setModal(True)
+        dialog.setMinimumWidth(360)
 
+        mainLayout = qt.QVBoxLayout()
         nameEdit = qt.QLineEdit()
         typeCombo = qt.QComboBox()
         typeCombo.addItems(["volume", "seg_labelmap", "seg_sparse"])
-        layout.addRow("Name:", nameEdit)
-        layout.addRow("Type:", typeCombo)
+        formLayout = qt.QFormLayout()
+        formLayout.addRow("Name:", nameEdit)
+        formLayout.addRow("Type:", typeCombo)
+        mainLayout.addLayout(formLayout)
 
-        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel)
-        buttons.connect("accepted()", dialog.accept)
-        buttons.connect("rejected()", dialog.reject)
-        layout.addRow(buttons)
+        # QDialogButtonBox is unreliable in some PythonQt builds (empty / invisible buttons).
+        btnRow = qt.QHBoxLayout()
+        btnRow.addStretch(1)
+        okBtn = qt.QPushButton("OK")
+        cancelBtn = qt.QPushButton("Cancel")
+        okBtn.setDefault(True)
+        okBtn.setAutoDefault(True)
+        btnRow.addWidget(okBtn)
+        btnRow.addWidget(cancelBtn)
+        mainLayout.addLayout(btnRow)
+        dialog.setLayout(mainLayout)
+
+        okBtn.connect("clicked()", dialog.accept)
+        cancelBtn.connect("clicked()", dialog.reject)
 
         if dialog.exec_() != qt.QDialog.Accepted:
             return
-        name = nameEdit.text.strip()
+        name = str(nameEdit.text).strip()
         if not name:
             return
 
@@ -573,6 +640,13 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
     def __init__(self):
         ScriptedLoadableModuleLogic.__init__(self)
         self.stickyPlans: dict[str, list[LoadPlanGroup]] = {}
+        # Controls how float dense labelmaps are converted into vtkMRMLLabelMapVolumeNode.
+        # Some pipelines export seg as int-like values in float arrays; others export 0-1 probability masks.
+        self.floatSegAutoThreshold: bool = True
+        self.floatSegThreshold: float = 0.5
+        self.floatSegNearIntTolerance: float = 1e-2
+        self.floatSegNearIntFraction: float = 0.95
+        self.floatSegIn01Fraction: float = 0.9
 
     # ---- Key analysis ------------------------------------------------------
 
@@ -631,7 +705,8 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
             return "seg_sparse_ind"
         if self._SPARSE_COLOR_PATTERN.search(name) and len(shape) == 1:
             return "seg_sparse_color"
-        if self._SEG_PATTERN.search(name) and len(shape) == 3 and np.issubdtype(np.dtype(dtype), np.integer):
+        # Dense seg: name matches seg; allow non-integer dtypes (e.g. float masks) — load casts to int16.
+        if self._SEG_PATTERN.search(name) and len(shape) == 3:
             return "seg_labelmap"
         if len(shape) == 3 and self._VOLUME_PATTERN.match(name) is None and self._SEG_PATTERN.search(name) is None:
             return "unknown"
@@ -845,6 +920,60 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
 
         return [volumeNode.GetID()], data.shape, rawSpacing, rawOrigin
 
+    def _convertFloatSegToLabelmap(self, segData: np.ndarray, threshold: float) -> tuple[np.ndarray, str]:
+        """
+        Convert float seg data into int16 labelmap.
+
+        Returns:
+          (labelmap_int16, mode)
+          - 'multilabel_from_near_integers'
+          - 'binary_threshold'
+          - 'fallback_round'
+        """
+        segFloat = np.asarray(segData)
+        if segFloat.size == 0:
+            return np.zeros(segFloat.shape, dtype=np.int16), "empty"
+
+        flat = segFloat.ravel()
+        finiteMask = np.isfinite(flat)
+        flat = flat[finiteMask]
+        if flat.size == 0:
+            return np.zeros(segFloat.shape, dtype=np.int16), "non_finite_only"
+        # Robustly detect whether there are values beyond the binary range at all.
+        # (Using full-array max avoids missing rare >1 voxels due to sampling.)
+        flatMax = float(np.max(flat))
+
+        # Sample for fast statistics on large volumes.
+        maxSamples = 200000
+        if flat.size > maxSamples:
+            idx = np.linspace(0, flat.size - 1, num=maxSamples, dtype=np.int64)
+            sample = flat[idx]
+        else:
+            sample = flat
+
+        # How close are values to nearest integers?
+        rounded = np.rint(sample)
+        nearInt = np.abs(sample - rounded) <= self.floatSegNearIntTolerance
+        nearIntFraction = float(np.mean(nearInt))
+
+        # How often are values within [0, 1] (with tolerance)?
+        in01 = (sample >= -self.floatSegNearIntTolerance) & (sample <= 1.0 + self.floatSegNearIntTolerance)
+        in01Fraction = float(np.mean(in01))
+
+        # Multi-label conversion is only safe when the float seg actually contains
+        # label values > 1 (otherwise it is often a 0/1 mask exported as float).
+        if nearIntFraction >= self.floatSegNearIntFraction and flatMax >= (2.0 - self.floatSegNearIntTolerance):
+            # Treat as multi-label (0,1,2,...) even if stored as float.
+            return np.rint(segFloat).astype(np.int16), "multilabel_from_near_integers"
+
+        if in01Fraction >= self.floatSegIn01Fraction:
+            thr = float(threshold)
+            thr = max(0.0, min(1.0, thr))
+            return (segFloat >= thr).astype(np.int16), "binary_threshold"
+
+        # Fallback: round to nearest integer labels.
+        return np.rint(segFloat).astype(np.int16), "fallback_round"
+
     # ---- Seg-labelmap loading ----------------------------------------------
 
     def loadSegLabelmap(self, npzData, group: LoadPlanGroup, baseName: str,
@@ -853,12 +982,12 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
         if not dataKey:
             raise ValueError("No data key specified for seg_labelmap group.")
 
-        segData = np.array(npzData[dataKey])
-        if segData.ndim != 3:
-            raise ValueError(f"Seg labelmap '{dataKey}' must be 3-D, got shape {segData.shape}")
+        segDataRaw = np.array(npzData[dataKey])
+        if segDataRaw.ndim != 3:
+            raise ValueError(f"Seg labelmap '{dataKey}' must be 3-D, got shape {segDataRaw.shape}")
 
         # Determine whether seg has its own spacing/origin
-        hasOwnGeometry = (volumeShape is None or segData.shape != volumeShape)
+        hasOwnGeometry = (volumeShape is None or segDataRaw.shape != volumeShape)
         if hasOwnGeometry:
             spacing_xyz, origin_xyz = self._resolveSpacingOrigin(npzData, group.mappings)
         else:
@@ -866,7 +995,22 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
                 npzData, group.mappings, volumeSpacing, volumeOrigin
             )
 
-        segData = self._coerceDtype(segData.astype(np.int16))
+        if np.issubdtype(segDataRaw.dtype, np.floating) and self.floatSegAutoThreshold:
+            segData, mode = self._convertFloatSegToLabelmap(segDataRaw, threshold=self.floatSegThreshold)
+            if mode == "binary_threshold":
+                slicer.util.warningDisplay(
+                    f"Float seg '{dataKey}' detected. Converted to binary labelmap using threshold={self.floatSegThreshold:g}."
+                )
+            elif mode == "fallback_round":
+                slicer.util.warningDisplay(
+                    f"Float seg '{dataKey}' detected, but not clearly 0-1 mask or integer-like. Converted by rounding to int16 labels."
+                )
+            else:
+                slicer.util.infoDisplay(
+                    f"Float seg '{dataKey}' detected. Treated as integer-like dense labelmap (rounded to int16)."
+                )
+        else:
+            segData = self._coerceDtype(segDataRaw.astype(np.int16))
 
         labelmapName = f"{baseName}_{group.name}_labelmap"
         labelmapNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", labelmapName)
@@ -942,6 +1086,7 @@ class NpzLoaderTest(ScriptedLoadableModuleTest):
         self.setUp()
         self.test_AnalyzeKeys()
         self.test_LoadVolume()
+        self.test_FloatSegConversion()
 
     def test_AnalyzeKeys(self):
         self.delayDisplay("Testing key analysis")
@@ -950,17 +1095,19 @@ class NpzLoaderTest(ScriptedLoadableModuleTest):
         vol = np.random.rand(10, 20, 30).astype(np.float32)
         seg = np.zeros((10, 20, 30), dtype=np.int16)
         seg[2:5, 3:8, 4:10] = 1
+        seg_float = np.zeros((10, 20, 30), dtype=np.float32)
         spacing = np.array([0.5, 0.5, 0.5])
         origin = np.array([10.0, 20.0, 30.0])
 
         tmpFile = os.path.join(tempfile.gettempdir(), "test_npz_loader.npz")
-        np.savez(tmpFile, img=vol, seg_organ=seg, spacing=spacing, origin=origin)
+        np.savez(tmpFile, img=vol, seg_organ=seg, seg=seg_float, spacing=spacing, origin=origin)
 
         logic = NpzLoaderLogic()
         keys = logic.analyzeNpzKeys(tmpFile)
         roles = {k.name: k.role for k in keys}
         assert roles["img"] == "volume", f"Expected volume, got {roles['img']}"
         assert roles["seg_organ"] == "seg_labelmap", f"Expected seg_labelmap, got {roles['seg_organ']}"
+        assert roles["seg"] == "seg_labelmap", f"Expected seg_labelmap for float seg key, got {roles['seg']}"
         assert roles["spacing"] == "spacing"
         assert roles["origin"] == "origin"
 
@@ -1004,3 +1151,30 @@ class NpzLoaderTest(ScriptedLoadableModuleTest):
         slicer.mrmlScene.RemoveNode(node)
         os.remove(tmpFile)
         self.delayDisplay("Volume loading test passed!")
+
+    def test_FloatSegConversion(self):
+        logic = NpzLoaderLogic()
+
+        rng = np.random.default_rng(0)
+        # Case 1: float values close to {0,1,2} -> multi-label
+        segIntLike = rng.choice([0.0, 1.0, 2.0], size=(6, 7, 8)).astype(np.float32)
+        segIntLike += rng.normal(0.0, 1e-3, size=segIntLike.shape).astype(np.float32)
+        label1, mode1 = logic._convertFloatSegToLabelmap(segIntLike, threshold=0.5)
+        assert mode1 == "multilabel_from_near_integers", f"Unexpected mode1: {mode1}"
+        u1 = set(np.unique(label1).tolist())
+        assert u1.issubset({0, 1, 2}), f"Unexpected labels1: {u1}"
+
+        # Case 2: random float in [0,1] -> binary threshold
+        seg01 = rng.random((6, 7, 8), dtype=np.float32)
+        label2, mode2 = logic._convertFloatSegToLabelmap(seg01, threshold=0.5)
+        assert mode2 == "binary_threshold", f"Unexpected mode2: {mode2}"
+        u2 = set(np.unique(label2).tolist())
+        assert u2.issubset({0, 1}), f"Unexpected labels2: {u2}"
+
+        # Case 3: float values near {0,1} -> should prefer binary threshold
+        seg01IntLike = rng.choice([0.0, 1.0], size=(6, 7, 8)).astype(np.float32)
+        seg01IntLike += rng.normal(0.0, 1e-3, size=seg01IntLike.shape).astype(np.float32)
+        label3, mode3 = logic._convertFloatSegToLabelmap(seg01IntLike, threshold=0.5)
+        assert mode3 == "binary_threshold", f"Unexpected mode3: {mode3}"
+        u3 = set(np.unique(label3).tolist())
+        assert u3.issubset({0, 1}), f"Unexpected labels3: {u3}"
