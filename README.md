@@ -1,12 +1,15 @@
 # NpzLoader for 3D Slicer
 
-`NpzLoader` is a scripted 3D Slicer extension module for loading volume and segmentation data from NumPy files (`.npz` / `.npy`) into the Slicer scene.
+`NpzLoader` is a scripted 3D Slicer extension module for data review workflows in Slicer.
 
-It is designed for quick inspection workflows where data is produced by Python pipelines and needs to be viewed in Slicer with minimal manual setup.
+It supports both NumPy archives (`.npz` / `.npy`) and paired image/segmentation directory layouts.
 
 ## Features
 
 - Loads scalar volumes from `.npz` or single-array `.npy` files.
+- Supports two data source modes:
+  - `NPZ Directory` (legacy mode, same behavior as before),
+  - `IMG+SEG Paired Directory` (new data review mode).
 - Loads segmentations from:
   - dense 3D labelmaps (`seg_*` style keys), and
   - sparse index format (`*_ind` / `*_inds` with optional `*_color_point(s)`).
@@ -67,15 +70,29 @@ If you are developing the module, place this repository where Slicer can load sc
 ## Usage
 
 1. Open **NPZ Loader** in Slicer.
-2. In **Directory & File Selection**, choose a folder containing `.npz` / `.npy` files.
-3. Select a file from the list.
-4. Review detected keys in **NPZ Key Analysis & Load Plan**.
-5. Adjust the generated load plan if needed:
+2. In **Directory & File Selection**, choose a data source mode:
+   - `NPZ Directory`, or
+   - `IMG+SEG Paired Directory`.
+3. Build/select the data list:
+   - NPZ mode: choose root directory and select a data item from the list.
+   - Paired mode: choose IMG directory + SEG directory, optionally enable `Only show data with seg`, then click `Scan`.
+4. If using NPZ mode, review detected keys in **NPZ Key Analysis & Load Plan**.
+5. If using NPZ mode, adjust the generated load plan if needed:
    - enable/disable groups,
    - remap keys (data / spacing / origin / sparse fields),
    - add or remove plan groups.
-6. Click **Load** to import data into the scene.
+6. Click **Load** to import selected data item into the scene.
 7. Click **Close / Clear** to remove nodes loaded by the current file.
+
+## IMG+SEG Paired Directory Convention
+
+- `IMG directory` is scanned at top level (non-recursive):
+  - If entry is a file with extension `.nii`, `.nii.gz`, `.nrrd`, or `.mhd`, it is one image item and `data_id` is the file basename.
+  - If entry is a directory, it is treated as one DICOM series item and `data_id` is the directory name.
+- `SEG directory` is scanned at top level only for files ending with `-seg.nii.gz`.
+- Matching rule: seg filename must `start with data_id` and `end with -seg.nii.gz`.
+- One `data_id` may match multiple segmentation files.
+- Items without segmentation can still be listed, and can be filtered out via `Only show data with seg`.
 
 ## Keyboard Shortcuts (module-focused workflow)
 

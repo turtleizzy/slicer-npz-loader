@@ -1,5 +1,7 @@
 import os
 import re
+import json
+import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from typing import Optional
@@ -58,6 +60,15 @@ class LoadPlanGroup:
     mappings: dict = field(default_factory=dict)
 
 
+@dataclass
+class ReviewDataItem:
+    data_id: str
+    source_type: str  # "npz" | "paired"
+    npz_path: Optional[str] = None
+    img_path: Optional[str] = None
+    seg_paths: list[str] = field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Widget
 # ---------------------------------------------------------------------------
@@ -72,7 +83,9 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         self._loadedNodeIds: list[str] = []
         self._loadedVolumeNodeIds: list[str] = []
         self._loadedSegmentationNodeIds: list[str] = []
-        self._currentFilePath: Optional[str] = None
+        self._currentDataItems: list[ReviewDataItem] = []
+        self._currentDataItem: Optional[ReviewDataItem] = None
+        self._pairedSegSuffixSelection: dict[str, bool] = {}
         self._segSingleModeIndex = 0
         self._segAllModeIndex = 0
         self._shortcuts: list[qt.QShortcut] = []
@@ -91,9 +104,16 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
 
         # --- Section 1: Directory & File Selection ---
         self.ui.directorySelector.filters = ctk.ctkPathLineEdit.Dirs
-        self.ui.directorySelector.settingKey = "NpzLoader/RootDirectory"
+        self.ui.imgDirectorySelector.filters = ctk.ctkPathLineEdit.Dirs
+        self.ui.segDirectorySelector.filters = ctk.ctkPathLineEdit.Dirs
         self.ui.directorySelector.connect("currentPathChanged(QString)", self.onDirectoryChanged)
+        self.ui.imgDirectorySelector.connect("currentPathChanged(QString)", self.onPairedPathChanged)
+        self.ui.segDirectorySelector.connect("currentPathChanged(QString)", self.onPairedPathChanged)
+        self.ui.sourceTypeComboBox.connect("currentIndexChanged(int)", self.onSourceTypeChanged)
+        self.ui.scanButton.connect("clicked()", self.onScanPairedDirectories)
+        self.ui.onlyWithSegCheckBox.connect("toggled(bool)", self.onOnlyWithSegToggled)
         self.ui.fileList.connect("currentRowChanged(int)", self.onFileSelected)
+        self._loadReviewSourceSettings()
 
         # --- Section 2: Load plan tree ---
         self.ui.loadPlanTree.setHeaderLabels(["Property", "Value"])
@@ -124,9 +144,8 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         self._setupShortcuts()
         self._setupSliceTool()
 
-        # Populate if a directory was restored from settings
-        if self.ui.directorySelector.currentPath:
-            self.onDirectoryChanged(self.ui.directorySelector.currentPath)
+        self._updateSourceUi()
+        self._refreshDataListFromSource()
 
     def cleanup(self):
         for shortcut in self._shortcuts:
@@ -158,6 +177,37 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         settings.setValue("NpzLoader/WLPresetF1", self.ui.wlPresetF1LineEdit.text.strip())
         settings.setValue("NpzLoader/WLPresetF2", self.ui.wlPresetF2LineEdit.text.strip())
         settings.setValue("NpzLoader/WLPresetF3", self.ui.wlPresetF3LineEdit.text.strip())
+
+    def _loadReviewSourceSettings(self):
+        settings = qt.QSettings()
+        sourceIdx = int(settings.value("NpzLoader/SourceTypeIndex", 0))
+        self.ui.sourceTypeComboBox.currentIndex = max(0, min(sourceIdx, 1))
+        self.ui.directorySelector.currentPath = settings.value("NpzLoader/RootDirectory", "")
+        self.ui.imgDirectorySelector.currentPath = settings.value("NpzLoader/ImgDirectory", "")
+        self.ui.segDirectorySelector.currentPath = settings.value("NpzLoader/SegDirectory", "")
+        self.ui.onlyWithSegCheckBox.checked = self._toBool(
+            settings.value("NpzLoader/OnlyWithSeg", False)
+        )
+        rawSuffixSelection = settings.value("NpzLoader/PairedSegSuffixSelection", "{}")
+        try:
+            parsed = json.loads(str(rawSuffixSelection))
+            self._pairedSegSuffixSelection = {
+                str(k): bool(v) for k, v in parsed.items()
+            } if isinstance(parsed, dict) else {}
+        except Exception:
+            self._pairedSegSuffixSelection = {}
+
+    def _saveReviewSourceSettings(self):
+        settings = qt.QSettings()
+        settings.setValue("NpzLoader/SourceTypeIndex", int(self.ui.sourceTypeComboBox.currentIndex))
+        settings.setValue("NpzLoader/RootDirectory", self.ui.directorySelector.currentPath)
+        settings.setValue("NpzLoader/ImgDirectory", self.ui.imgDirectorySelector.currentPath)
+        settings.setValue("NpzLoader/SegDirectory", self.ui.segDirectorySelector.currentPath)
+        settings.setValue("NpzLoader/OnlyWithSeg", bool(self.ui.onlyWithSegCheckBox.checked))
+        settings.setValue(
+            "NpzLoader/PairedSegSuffixSelection",
+            json.dumps(self._pairedSegSuffixSelection, ensure_ascii=True),
+        )
 
     @staticmethod
     def _toBool(value) -> bool:
@@ -360,26 +410,183 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
 
     # ---- Directory & file list ---------------------------------------------
 
-    def onDirectoryChanged(self, dirPath):
+    def _isNpzSourceMode(self) -> bool:
+        return int(self.ui.sourceTypeComboBox.currentIndex) == 0
+
+    def _updateSourceUi(self):
+        isNpz = self._isNpzSourceMode()
+        self.ui.directoryLabel.visible = isNpz
+        self.ui.directorySelector.visible = isNpz
+        self.ui.imgDirectoryLabel.visible = not isNpz
+        self.ui.imgDirectorySelector.visible = not isNpz
+        self.ui.segDirectoryLabel.visible = not isNpz
+        self.ui.segDirectorySelector.visible = not isNpz
+        self.ui.scanButton.visible = not isNpz
+        self.ui.onlyWithSegCheckBox.visible = not isNpz
+        self.ui.keyInfoLabel.visible = isNpz
+        self.ui.keyInfoTable.visible = isNpz
+        self.ui.loadPlanLabel.visible = True
+        self.ui.loadPlanTree.visible = True
+        self.ui.addGroupButton.visible = isNpz
+        self.ui.removeGroupButton.visible = isNpz
+        self.ui.loadPlanCollapsible.text = (
+            "NPZ Key Analysis & Load Plan" if isNpz else "Paired Load Plan"
+        )
+        self.ui.loadPlanLabel.text = (
+            "Load Plan (check groups to load, edit key mappings):"
+            if isNpz else
+            "Load Plan (check image/seg items to load):"
+        )
+        self.ui.loadPlanTree.setColumnCount(2)
+        if isNpz:
+            self.ui.loadPlanTree.setHeaderLabels(["Property", "Value"])
+        else:
+            self.ui.loadPlanTree.setHeaderLabels(["Item", "Suffix"])
+
+    def _setDataItems(self, items: list[ReviewDataItem]):
+        self._currentDataItems = items
+        self._currentDataItem = None
         self.ui.fileList.clear()
-        if not dirPath or not os.path.isdir(dirPath):
+        for item in items:
+            self.ui.fileList.addItem(item.data_id)
+
+    def _clearPlanUi(self):
+        self._currentKeys = []
+        self._loadPlanGroups = []
+        self.ui.keyInfoTable.clearContents()
+        self.ui.keyInfoTable.setRowCount(0)
+        self.ui.loadPlanTree.clear()
+
+    def _refreshDataListFromSource(self):
+        if self._isNpzSourceMode():
+            self.onDirectoryChanged(self.ui.directorySelector.currentPath)
+        else:
+            self.onScanPairedDirectories()
+
+    def onSourceTypeChanged(self, _index: int):
+        self._saveReviewSourceSettings()
+        self._updateSourceUi()
+        self._clearPlanUi()
+        self.ui.statusLabel.text = "No data selected."
+        self._refreshDataListFromSource()
+
+    def onDirectoryChanged(self, dirPath):
+        if not self._isNpzSourceMode():
             return
-        for fname in sorted(os.listdir(dirPath)):
-            if fname.lower().endswith((".npz", ".npy")):
-                self.ui.fileList.addItem(fname)
+        self._saveReviewSourceSettings()
+        self._clearPlanUi()
+        if not dirPath or not os.path.isdir(dirPath):
+            self._setDataItems([])
+            self.ui.statusLabel.text = "Select a valid NPZ root directory."
+            return
+        items = self.logic.scanNpzDirectory(dirPath)
+        self._setDataItems(items)
+        self.ui.statusLabel.text = f"Found {len(items)} NPZ/NPY items."
+
+    def onPairedPathChanged(self, _path: str):
+        self._saveReviewSourceSettings()
+
+    def onOnlyWithSegToggled(self, _checked: bool):
+        self._saveReviewSourceSettings()
+        if not self._isNpzSourceMode():
+            self.onScanPairedDirectories()
+
+    def onScanPairedDirectories(self):
+        if self._isNpzSourceMode():
+            return
+        self._saveReviewSourceSettings()
+        self._clearPlanUi()
+        imgDir = self.ui.imgDirectorySelector.currentPath
+        segDir = self.ui.segDirectorySelector.currentPath
+        validImgDir = bool(imgDir and os.path.isdir(imgDir))
+        validSegDir = bool(segDir and os.path.isdir(segDir))
+        if not validImgDir and not validSegDir:
+            self._setDataItems([])
+            self.ui.statusLabel.text = "Select at least one valid IMG or SEG directory."
+            return
+        onlyWithSeg = bool(self.ui.onlyWithSegCheckBox.checked)
+        items, totalItems, withSegCount, unmatchedSegCount = self.logic.scanPairedDirectory(
+            imgDir if validImgDir else None,
+            segDir if validSegDir else None,
+            onlyWithSeg=onlyWithSeg,
+        )
+        self._setDataItems(items)
+        self.ui.statusLabel.text = (
+            f"Scanned paired directories: total={totalItems}, with_seg={withSegCount}, "
+            f"listed={len(items)}, unmatched_seg_files={unmatchedSegCount}"
+        )
 
     def onFileSelected(self, row):
         if row < 0:
             return
-        dirPath = self.ui.directorySelector.currentPath
-        fname = self.ui.fileList.item(row).text()
-        filePath = os.path.join(dirPath, fname)
-        self._currentFilePath = filePath
+        if row >= len(self._currentDataItems):
+            return
+        item = self._currentDataItems[row]
+        self._currentDataItem = item
+        self.ui.statusLabel.text = f"Selected: {item.data_id}"
+        if item.source_type == "npz" and item.npz_path:
+            self._analyzeAndBuildPlan(item.npz_path)
+        else:
+            self._clearPlanUi()
+            self._populatePairedLoadPlanTree(item)
+            self.ui.statusLabel.text = (
+                f"Selected: {item.data_id} (paired image, seg count={len(item.seg_paths)})"
+            )
 
-        baseName = os.path.splitext(fname)[0]
-        self.ui.statusLabel.text = f"Selected: {baseName}"
+    def _extractSegSuffix(self, dataId: str, segPath: str) -> str:
+        base = os.path.basename(segPath)
+        if not base.lower().endswith("-seg.nii.gz"):
+            return ""
+        stem = base[:-len("-seg.nii.gz")]
+        if stem.startswith(dataId):
+            return stem[len(dataId):]
+        return ""
 
-        self._analyzeAndBuildPlan(filePath)
+    def _populatePairedLoadPlanTree(self, item: ReviewDataItem):
+        tree = self.ui.loadPlanTree
+        tree.clear()
+        tree.setColumnCount(2)
+        tree.setHeaderLabels(["Item", "Suffix"])
+        self.ui.loadPlanTree.visible = True
+
+        imgItem = qt.QTreeWidgetItem(tree)
+        imgItem.setText(0, "image")
+        imgItem.setText(1, os.path.basename(item.img_path) if item.img_path else "(none)")
+        imgItem.setData(0, qt.Qt.UserRole, "image")
+        imgItem.setFlags(imgItem.flags() | qt.Qt.ItemIsUserCheckable)
+        imgItem.setCheckState(0, qt.Qt.Checked if item.img_path else qt.Qt.Unchecked)
+
+        for segPath in item.seg_paths:
+            suffix = self._extractSegSuffix(item.data_id, segPath)
+            isEnabled = self._pairedSegSuffixSelection.get(suffix, True)
+            segItem = qt.QTreeWidgetItem(tree)
+            segItem.setText(0, f"seg: {os.path.basename(segPath)}")
+            segItem.setText(1, suffix if suffix else "(empty)")
+            segItem.setData(0, qt.Qt.UserRole, "seg")
+            segItem.setData(1, qt.Qt.UserRole, segPath)
+            segItem.setData(1, qt.Qt.UserRole + 1, suffix)
+            segItem.setFlags(segItem.flags() | qt.Qt.ItemIsUserCheckable)
+            segItem.setCheckState(0, qt.Qt.Checked if isEnabled else qt.Qt.Unchecked)
+        tree.resizeColumnToContents(0)
+
+    def _readPairedLoadPlanSelection(self) -> tuple[bool, list[str]]:
+        tree = self.ui.loadPlanTree
+        loadImage = True
+        selectedSegPaths: list[str] = []
+        for i in range(tree.topLevelItemCount):
+            item = tree.topLevelItem(i)
+            role = item.data(0, qt.Qt.UserRole)
+            checked = (item.checkState(0) == qt.Qt.Checked)
+            if role == "image":
+                loadImage = checked
+            elif role == "seg":
+                segPath = item.data(1, qt.Qt.UserRole)
+                suffix = item.data(1, qt.Qt.UserRole + 1) or ""
+                self._pairedSegSuffixSelection[str(suffix)] = checked
+                if checked and segPath:
+                    selectedSegPaths.append(str(segPath))
+        self._saveReviewSourceSettings()
+        return loadImage, selectedSegPaths
 
     # ---- Key analysis & plan building --------------------------------------
 
@@ -516,8 +723,17 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
     # ---- Load / Close ------------------------------------------------------
 
     def onLoad(self):
-        if not self._currentFilePath:
-            slicer.util.warningDisplay("No file selected.")
+        if not self._currentDataItem:
+            slicer.util.warningDisplay("No data selected.")
+            return
+        if self._currentDataItem.source_type == "npz":
+            self._loadCurrentNpzItem()
+        else:
+            self._loadCurrentPairedItem()
+
+    def _loadCurrentNpzItem(self):
+        if not self._currentDataItem or not self._currentDataItem.npz_path:
+            slicer.util.warningDisplay("No NPZ/NPY item selected.")
             return
 
         self._readLoadPlanFromTree()
@@ -532,10 +748,10 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         self._segSingleModeIndex = 0
         self._segAllModeIndex = 0
 
-        baseName = os.path.splitext(os.path.basename(self._currentFilePath))[0]
+        baseName = self._currentDataItem.data_id
 
         try:
-            npzData = self.logic.loadFile(self._currentFilePath)
+            npzData = self.logic.loadFile(self._currentDataItem.npz_path)
         except Exception as e:
             slicer.util.errorDisplay(f"Failed to load file:\n{e}")
             return
@@ -589,6 +805,48 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         self.logic.stickyPlans[signature] = self.logic.clonePlanGroups(self._loadPlanGroups)
 
         self.ui.statusLabel.text = f"Loaded: {baseName} ({len(self._loadedNodeIds)} nodes)"
+        if self._sliceViewingTool:
+            self._sliceViewingTool.onDataLoaded()
+
+    def _loadCurrentPairedItem(self):
+        if not self._currentDataItem:
+            slicer.util.warningDisplay("No paired data item selected.")
+            return
+
+        self._clearNodes()
+        self._segSingleModeIndex = 0
+        self._segAllModeIndex = 0
+
+        item = self._currentDataItem
+        warnings: list[str] = []
+        loadedCount = 0
+        loadImage, selectedSegPaths = self._readPairedLoadPlanSelection()
+
+        if not loadImage and not selectedSegPaths:
+            slicer.util.warningDisplay("No paired items are enabled in load plan.")
+            return
+
+        if loadImage and item.img_path:
+            try:
+                volumeNodeId = self.logic.loadPairedImage(item.img_path, item.data_id)
+                self._loadedNodeIds.append(volumeNodeId)
+                self._loadedVolumeNodeIds.append(volumeNodeId)
+                loadedCount += 1
+            except Exception as e:
+                slicer.util.errorDisplay(f"Failed to load paired image for '{item.data_id}':\n{e}")
+                return
+
+        segNodeIds, segWarnings = self.logic.loadPairedSegmentations(selectedSegPaths, item.data_id)
+        self._loadedNodeIds.extend(segNodeIds)
+        self._loadedSegmentationNodeIds.extend(segNodeIds)
+        loadedCount += len(segNodeIds)
+        warnings.extend(segWarnings)
+
+        if warnings:
+            slicer.util.warningDisplay("\n".join(warnings))
+        self.ui.statusLabel.text = (
+            f"Loaded paired item: {item.data_id} ({loadedCount} nodes, seg={len(segNodeIds)})"
+        )
         if self._sliceViewingTool:
             self._sliceViewingTool.onDataLoaded()
 
@@ -647,6 +905,7 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
         self.floatSegNearIntTolerance: float = 1e-2
         self.floatSegNearIntFraction: float = 0.95
         self.floatSegIn01Fraction: float = 0.9
+        self._supportedImageExtensions = (".nii", ".nii.gz", ".nrrd", ".mhd")
 
     # ---- Key analysis ------------------------------------------------------
 
@@ -803,6 +1062,96 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
             return {"ind": None, "color_point": None, "spacing": None, "origin": None}
         return {}
 
+    # ---- Data source scanning ----------------------------------------------
+
+    @staticmethod
+    def _stripKnownImageSuffix(name: str) -> str:
+        lower = name.lower()
+        if lower.endswith(".nii.gz"):
+            return name[:-7]
+        for suffix in (".nii", ".nrrd", ".mhd", ".npz", ".npy"):
+            if lower.endswith(suffix):
+                return name[: -len(suffix)]
+        return name
+
+    def scanNpzDirectory(self, dirPath: str) -> list[ReviewDataItem]:
+        items: list[ReviewDataItem] = []
+        for fname in sorted(os.listdir(dirPath)):
+            if not fname.lower().endswith((".npz", ".npy")):
+                continue
+            dataId = self._stripKnownImageSuffix(fname)
+            items.append(ReviewDataItem(
+                data_id=dataId,
+                source_type="npz",
+                npz_path=os.path.join(dirPath, fname),
+            ))
+        return items
+
+    def scanPairedDirectory(
+        self, imgDir: Optional[str], segDir: Optional[str], onlyWithSeg: bool = False
+    ) -> tuple[list[ReviewDataItem], int, int, int]:
+        itemsById: dict[str, ReviewDataItem] = {}
+
+        if imgDir and os.path.isdir(imgDir):
+            for entry in sorted(os.listdir(imgDir)):
+                entryPath = os.path.join(imgDir, entry)
+                if os.path.isdir(entryPath):
+                    itemsById[entry] = ReviewDataItem(
+                        data_id=entry,
+                        source_type="paired",
+                        img_path=entryPath,
+                    )
+                    continue
+                lower = entry.lower()
+                if lower.endswith(self._supportedImageExtensions):
+                    dataId = self._stripKnownImageSuffix(entry)
+                    itemsById[dataId] = ReviewDataItem(
+                        data_id=dataId,
+                        source_type="paired",
+                        img_path=entryPath,
+                    )
+
+        segEntries: list[tuple[str, str, str]] = []
+        if segDir and os.path.isdir(segDir):
+            for f in sorted(os.listdir(segDir)):
+                fullPath = os.path.join(segDir, f)
+                if not os.path.isfile(fullPath) or not f.lower().endswith("-seg.nii.gz"):
+                    continue
+                segStem = f[:-len("-seg.nii.gz")]
+                segEntries.append((f, fullPath, segStem))
+
+        matchedSegFiles: set[str] = set()
+        if itemsById:
+            for dataId, item in itemsById.items():
+                segPaths: list[str] = []
+                for segName, segPath, _segStem in segEntries:
+                    if segName.startswith(dataId):
+                        matchedSegFiles.add(segName)
+                        segPaths.append(segPath)
+                item.seg_paths = segPaths
+        else:
+            # SEG-only mode: build data items from seg stems.
+            for segName, segPath, segStem in segEntries:
+                dataId = segStem
+                item = itemsById.get(dataId)
+                if item is None:
+                    item = ReviewDataItem(
+                        data_id=dataId,
+                        source_type="paired",
+                        img_path=None,
+                        seg_paths=[],
+                    )
+                    itemsById[dataId] = item
+                item.seg_paths.append(segPath)
+                matchedSegFiles.add(segName)
+
+        allItems = [itemsById[k] for k in sorted(itemsById.keys())]
+        withSegCount = sum(1 for item in allItems if item.seg_paths)
+        listedItems = [item for item in allItems if (item.seg_paths or not onlyWithSeg)]
+
+        unmatchedSegCount = len(segEntries) - len(matchedSegFiles)
+        return listedItems, len(allItems), withSegCount, unmatchedSegCount
+
     # ---- File loading ------------------------------------------------------
 
     @staticmethod
@@ -813,6 +1162,68 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
             arr = np.load(filePath, allow_pickle=False)
             return _NpyWrapper(arr)
         return np.load(filePath, allow_pickle=False)
+
+    def loadPairedImage(self, imgPath: str, baseName: str) -> str:
+        if os.path.isdir(imgPath):
+            return self._loadDicomSeriesFromDirectory(imgPath, baseName)
+        success, volumeNode = slicer.util.loadVolume(imgPath, returnNode=True)
+        if not success or volumeNode is None:
+            raise ValueError(f"Failed to load image file: {imgPath}")
+        volumeNode.SetName(baseName)
+        slicer.util.setSliceViewerLayers(background=volumeNode, fit=True)
+        return volumeNode.GetID()
+
+    @staticmethod
+    def _loadDicomSeriesFromDirectory(dicomDir: str, baseName: str) -> str:
+        try:
+            from DICOMLib import DICOMUtils
+        except Exception as e:
+            raise RuntimeError(f"DICOM support is unavailable: {e}") from e
+
+        beforeIds = {n.GetID() for n in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")}
+        with DICOMUtils.TemporaryDICOMDatabase(tempfile.mkdtemp(prefix="npzloader_dicomdb_")) as db:
+            DICOMUtils.importDicom(dicomDir, db)
+            patientUIDs = db.patients()
+            if not patientUIDs:
+                raise ValueError(f"No DICOM patient found under directory: {dicomDir}")
+            for patientUid in patientUIDs:
+                DICOMUtils.loadPatientByUID(patientUid)
+
+        newNodes = [
+            node for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
+            if node.GetID() not in beforeIds
+        ]
+        if not newNodes:
+            raise RuntimeError("No scalar volume node was loaded from DICOM directory.")
+        volumeNode = newNodes[-1]
+        volumeNode.SetName(baseName)
+        slicer.util.setSliceViewerLayers(background=volumeNode, fit=True)
+        return volumeNode.GetID()
+
+    @staticmethod
+    def loadPairedSegmentations(segPaths: list[str], baseName: str) -> tuple[list[str], list[str]]:
+        segNodeIds: list[str] = []
+        warnings: list[str] = []
+        for segPath in segPaths:
+            segStem = NpzLoaderLogic._stripKnownImageSuffix(os.path.basename(segPath))
+            nodeName = f"{baseName}_{segStem}"
+            try:
+                success, segNode = slicer.util.loadSegmentation(segPath, returnNode=True)
+                if not success or segNode is None:
+                    warnings.append(f"Failed to load segmentation: {segPath}")
+                    continue
+                segNode.SetName(nodeName)
+                segNode.CreateClosedSurfaceRepresentation()
+                segNode.CreateDefaultDisplayNodes()
+                segDisplayNode = segNode.GetDisplayNode()
+                if segDisplayNode:
+                    segDisplayNode.SetPreferredDisplayRepresentationName3D("Closed surface")
+                    segDisplayNode.SetVisibility(True)
+                    segDisplayNode.SetVisibility3D(True)
+                segNodeIds.append(segNode.GetID())
+            except Exception as e:
+                warnings.append(f"Failed to load segmentation '{segPath}': {e}")
+        return segNodeIds, warnings
 
     # ---- Loading helpers ---------------------------------------------------
 
@@ -1021,6 +1432,12 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
         segNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", segNodeName)
         slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(labelmapNode, segNode)
         segNode.CreateClosedSurfaceRepresentation()
+        segNode.CreateDefaultDisplayNodes()
+        segDisplayNode = segNode.GetDisplayNode()
+        if segDisplayNode:
+            segDisplayNode.SetPreferredDisplayRepresentationName3D("Closed surface")
+            segDisplayNode.SetVisibility(True)
+            segDisplayNode.SetVisibility3D(True)
 
         slicer.mrmlScene.RemoveNode(labelmapNode)
 
@@ -1067,6 +1484,12 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
         segNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", segNodeName)
         slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(labelmapNode, segNode)
         segNode.CreateClosedSurfaceRepresentation()
+        segNode.CreateDefaultDisplayNodes()
+        segDisplayNode = segNode.GetDisplayNode()
+        if segDisplayNode:
+            segDisplayNode.SetPreferredDisplayRepresentationName3D("Closed surface")
+            segDisplayNode.SetVisibility(True)
+            segDisplayNode.SetVisibility3D(True)
 
         slicer.mrmlScene.RemoveNode(labelmapNode)
 
@@ -1085,6 +1508,7 @@ class NpzLoaderTest(ScriptedLoadableModuleTest):
     def runTest(self):
         self.setUp()
         self.test_AnalyzeKeys()
+        self.test_ScanPairedDirectory()
         self.test_LoadVolume()
         self.test_FloatSegConversion()
 
@@ -1151,6 +1575,70 @@ class NpzLoaderTest(ScriptedLoadableModuleTest):
         slicer.mrmlScene.RemoveNode(node)
         os.remove(tmpFile)
         self.delayDisplay("Volume loading test passed!")
+
+    def test_ScanPairedDirectory(self):
+        self.delayDisplay("Testing paired directory scan")
+        import shutil
+        import tempfile
+
+        rootDir = tempfile.mkdtemp(prefix="npz_loader_paired_")
+        imgDir = os.path.join(rootDir, "img")
+        segDir = os.path.join(rootDir, "seg")
+        os.makedirs(imgDir)
+        os.makedirs(segDir)
+
+        try:
+            # IMG entries: one volume file + one dicom folder
+            open(os.path.join(imgDir, "case_a.nii.gz"), "a", encoding="utf-8").close()
+            os.makedirs(os.path.join(imgDir, "case_b"))
+            open(os.path.join(imgDir, "notes.txt"), "a", encoding="utf-8").close()
+
+            # SEG entries (root-level only)
+            open(os.path.join(segDir, "case_a-lesion-seg.nii.gz"), "a", encoding="utf-8").close()
+            open(os.path.join(segDir, "case_b-main-seg.nii.gz"), "a", encoding="utf-8").close()
+            open(os.path.join(segDir, "case_b-alt-seg.nii.gz"), "a", encoding="utf-8").close()
+            open(os.path.join(segDir, "orphan-seg.nii.gz"), "a", encoding="utf-8").close()
+            os.makedirs(os.path.join(segDir, "nested"))
+            open(os.path.join(segDir, "nested", "case_a-nested-seg.nii.gz"), "a", encoding="utf-8").close()
+
+            logic = NpzLoaderLogic()
+            items, totalCount, withSegCount, unmatchedSeg = logic.scanPairedDirectory(
+                imgDir, segDir, onlyWithSeg=False
+            )
+            assert totalCount == 2, f"Expected 2 data items, got {totalCount}"
+            assert len(items) == 2
+            assert withSegCount == 2
+            assert unmatchedSeg == 1
+
+            byId = {item.data_id: item for item in items}
+            assert "case_a" in byId
+            assert "case_b" in byId
+            assert len(byId["case_a"].seg_paths) == 1
+            assert len(byId["case_b"].seg_paths) == 2
+
+            filteredItems, _, _, _ = logic.scanPairedDirectory(imgDir, segDir, onlyWithSeg=True)
+            assert len(filteredItems) == 2
+
+            # IMG-only scan still returns image items.
+            imgOnlyItems, imgOnlyTotal, imgOnlyWithSeg, imgOnlyUnmatched = logic.scanPairedDirectory(
+                imgDir, None, onlyWithSeg=False
+            )
+            assert imgOnlyTotal == 2
+            assert len(imgOnlyItems) == 2
+            assert imgOnlyWithSeg == 0
+            assert imgOnlyUnmatched == 0
+
+            # SEG-only scan builds items directly from seg stems.
+            segOnlyItems, segOnlyTotal, segOnlyWithSeg, segOnlyUnmatched = logic.scanPairedDirectory(
+                None, segDir, onlyWithSeg=False
+            )
+            assert segOnlyTotal == 4, f"Expected 4 seg-only items, got {segOnlyTotal}"
+            assert len(segOnlyItems) == 4
+            assert segOnlyWithSeg == 4
+            assert segOnlyUnmatched == 0
+        finally:
+            shutil.rmtree(rootDir, ignore_errors=True)
+        self.delayDisplay("Paired scan test passed!")
 
     def test_FloatSegConversion(self):
         logic = NpzLoaderLogic()

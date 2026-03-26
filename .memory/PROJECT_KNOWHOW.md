@@ -93,3 +93,65 @@ Local Slicer installation/build path:
 - `/wr/Slicer-5.11.0-2025-11-17-linux-amd64/Slicer`
 
 When you need to test behavior or inspect Slicer APIs (python modules/classes, MRML helpers, segmentations/volumes logic, etc.), run/view them in this local Slicer environment first (for example, using its Python interpreter / ensuring matching versions).
+
+## 2026-03 data review expansion notes
+
+### Data source architecture
+
+- The module now supports two review sources in one workflow:
+  - `NPZ Directory` (legacy behavior),
+  - `IMG+SEG Paired Directory`.
+- New shared item model: `ReviewDataItem` (`data_id`, `source_type`, `npz_path`, `img_path`, `seg_paths`).
+- UI list now represents generic **data items** (`data_id`) instead of only NPZ filenames.
+
+### Paired scan rules (current contract)
+
+- IMG scan is top-level only:
+  - file entries (`.nii/.nii.gz/.nrrd/.mhd`) -> one item, `data_id = basename`,
+  - directory entries -> one DICOM-series item, `data_id = folder name`.
+- SEG scan is top-level only, matching files ending with `-seg.nii.gz`.
+- In paired mode, list generation supports all three scenarios:
+  - IMG+SEG available,
+  - IMG-only,
+  - SEG-only.
+- SEG-only behavior: each seg file stem (filename without `-seg.nii.gz`) becomes one `data_id`.
+
+### Paired load plan behavior
+
+- Paired mode reuses the existing load-plan tree area but with a paired-specific plan:
+  - one checkable `image` row (may be unchecked when `img_path` missing),
+  - multiple checkable `seg` rows.
+- Seg suffix preference is persisted across reviews via QSettings:
+  - key: `NpzLoader/PairedSegSuffixSelection`,
+  - format: JSON dict `suffix -> bool`.
+- `Only show data with seg` remains a filtering option over scanned paired items.
+
+### Source switching and state reset
+
+- Important: when switching source type, stale plan/list state must be reset.
+- Current reset flow clears:
+  - `_currentDataItem`, `_currentDataItems`,
+  - `fileList` content/selection,
+  - key table and load plan tree content,
+  - status text.
+- Tree headers should match source mode (`Property/Value` for NPZ, `Item/Suffix` for paired) to avoid confusing leftovers.
+
+### Paired load execution
+
+- Paired loading now supports:
+  - image + seg,
+  - image-only,
+  - seg-only (if user checks seg rows).
+- DICOM folder image loading uses `DICOMLib.DICOMUtils` with a temporary DICOM DB.
+- Seg loading failures are non-fatal per file; warnings are accumulated.
+
+### "Show 3D" gotcha (segmentation tab semantics)
+
+- Simply calling `SetVisibility3D(True)` may be insufficient for what users expect as segmentation-tab `Show 3D`.
+- Robust sequence after seg import/load:
+  1. `CreateClosedSurfaceRepresentation()`
+  2. `CreateDefaultDisplayNodes()`
+  3. `displayNode.SetPreferredDisplayRepresentationName3D("Closed surface")`
+  4. `displayNode.SetVisibility(True)`
+  5. `displayNode.SetVisibility3D(True)`
+- Apply this consistently to NPZ labelmap seg, NPZ sparse seg, and paired seg file loading paths.

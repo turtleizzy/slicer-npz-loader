@@ -12,20 +12,71 @@
       <item>
        <layout class="QFormLayout" name="dirFormLayout">
         <item row="0" column="0">
+         <widget class="QLabel" name="sourceTypeLabel">
+          <property name="text"><string>Data Source:</string></property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <widget class="QComboBox" name="sourceTypeComboBox">
+          <item>
+           <property name="text"><string>NPZ Directory</string></property>
+          </item>
+          <item>
+           <property name="text"><string>IMG+SEG Paired Directory</string></property>
+          </item>
+         </widget>
+        </item>
+        <item row="1" column="0">
          <widget class="QLabel" name="directoryLabel">
           <property name="text"><string>Root Directory:</string></property>
          </widget>
         </item>
-        <item row="0" column="1">
+        <item row="1" column="1">
          <widget class="ctkPathLineEdit" name="directorySelector">
           <property name="toolTip"><string>Select root directory containing NPZ/NPY files</string></property>
          </widget>
+        </item>
+        <item row="2" column="0">
+         <widget class="QLabel" name="imgDirectoryLabel">
+          <property name="text"><string>IMG Directory:</string></property>
+         </widget>
+        </item>
+        <item row="2" column="1">
+         <widget class="ctkPathLineEdit" name="imgDirectorySelector">
+          <property name="toolTip"><string>Select image directory for paired mode</string></property>
+         </widget>
+        </item>
+        <item row="3" column="0">
+         <widget class="QLabel" name="segDirectoryLabel">
+          <property name="text"><string>SEG Directory:</string></property>
+         </widget>
+        </item>
+        <item row="3" column="1">
+         <widget class="ctkPathLineEdit" name="segDirectorySelector">
+          <property name="toolTip"><string>Select segmentation directory for paired mode</string></property>
+         </widget>
+        </item>
+        <item row="4" column="1">
+         <layout class="QHBoxLayout" name="pairedControlsLayout">
+          <item>
+           <widget class="QCheckBox" name="onlyWithSegCheckBox">
+            <property name="text"><string>Only show data with seg</string></property>
+            <property name="checked"><bool>false</bool></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="scanButton">
+            <property name="text"><string>Scan</string></property>
+            <property name="toolTip"><string>Scan img/seg directories and build data list</string></property>
+           </widget>
+          </item>
+         </layout>
         </item>
        </layout>
       </item>
       <item>
        <widget class="QLabel" name="fileListLabel">
-        <property name="text"><string>NPZ/NPY Files:</string></property>
+        <property name="text"><string>Data List:</string></property>
        </widget>
       </item>
       <item>
