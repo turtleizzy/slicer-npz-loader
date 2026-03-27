@@ -109,12 +109,16 @@ When you need to test behavior or inspect Slicer APIs (python modules/classes, M
 - IMG scan is top-level only:
   - file entries (`.nii/.nii.gz/.nrrd/.mhd`) -> one item, `data_id = basename`,
   - directory entries -> one DICOM-series item, `data_id = folder name`.
-- SEG scan is top-level only, matching files ending with `-seg.nii.gz`.
+- SEG scan supports two modes:
+  - flat root mode: use root-level files ending with `-seg.nii.gz`,
+  - nested root mode: if root has no `-seg.nii.gz` file but has subdirectories, use first-level folder name as `data_id` and recursively collect `-seg.nii.gz` under each folder.
 - In paired mode, list generation supports all three scenarios:
   - IMG+SEG available,
   - IMG-only,
   - SEG-only.
-- SEG-only behavior: each seg file stem (filename without `-seg.nii.gz`) becomes one `data_id`.
+- SEG-only behavior:
+  - flat mode: each seg file stem (filename without `-seg.nii.gz`) becomes one `data_id`,
+  - nested mode: each first-level folder becomes one `data_id`.
 
 ### Paired load plan behavior
 
@@ -124,6 +128,13 @@ When you need to test behavior or inspect Slicer APIs (python modules/classes, M
 - Seg suffix preference is persisted across reviews via QSettings:
   - key: `NpzLoader/PairedSegSuffixSelection`,
   - format: JSON dict `suffix -> bool`.
+- Image row preference is also persisted:
+  - key: `NpzLoader/PairedLoadImageSelection`,
+  - value: bool.
+- Important UI behavior: when switching selected `data_id`, current paired load-plan selections are persisted immediately before rebuilding tree for the new item.
+- Suffix extraction rule for preference keys:
+  - if seg stem starts with `data_id`, suffix is the remaining tail (legacy behavior),
+  - otherwise use seg stem directly (needed for nested seg directories where file names may not include `data_id`).
 - `Only show data with seg` remains a filtering option over scanned paired items.
 
 ### Source switching and state reset

@@ -89,10 +89,20 @@ If you are developing the module, place this repository where Slicer can load sc
 - `IMG directory` is scanned at top level (non-recursive):
   - If entry is a file with extension `.nii`, `.nii.gz`, `.nrrd`, or `.mhd`, it is one image item and `data_id` is the file basename.
   - If entry is a directory, it is treated as one DICOM series item and `data_id` is the directory name.
-- `SEG directory` is scanned at top level only for files ending with `-seg.nii.gz`.
-- Matching rule: seg filename must `start with data_id` and `end with -seg.nii.gz`.
+- `SEG directory` supports two scan modes:
+  - **Flat mode (legacy):** if root-level files matching `-seg.nii.gz` exist, only those root files are used.
+  - **Nested mode:** if no root `-seg.nii.gz` file exists and the root contains subdirectories, each first-level subdirectory name is treated as `data_id`, and `-seg.nii.gz` files are collected recursively from that subdirectory.
+- Matching rule in flat mode: seg filename must `start with data_id` and `end with -seg.nii.gz`.
 - One `data_id` may match multiple segmentation files.
 - Items without segmentation can still be listed, and can be filtered out via `Only show data with seg`.
+
+### Paired Load Plan Preference Persistence
+
+- In paired mode, load plan check states are persisted when switching `data_id` (not only when clicking `Load`).
+- Persisted preferences include:
+  - image row enabled/disabled state,
+  - segmentation row enabled/disabled state keyed by seg suffix.
+- For nested SEG mode where seg filenames may not start with `data_id`, suffix falls back to filename stem (without `-seg.nii.gz`) to provide stable per-seg preference keys.
 
 ## Keyboard Shortcuts (module-focused workflow)
 

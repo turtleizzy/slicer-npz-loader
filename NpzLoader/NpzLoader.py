@@ -86,6 +86,7 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         self._currentDataItems: list[ReviewDataItem] = []
         self._currentDataItem: Optional[ReviewDataItem] = None
         self._pairedSegSuffixSelection: dict[str, bool] = {}
+        self._pairedLoadImageSelection: bool = True
         self._segSingleModeIndex = 0
         self._segAllModeIndex = 0
         self._shortcuts: list[qt.QShortcut] = []
@@ -196,6 +197,9 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
             } if isinstance(parsed, dict) else {}
         except Exception:
             self._pairedSegSuffixSelection = {}
+        self._pairedLoadImageSelection = self._toBool(
+            settings.value("NpzLoader/PairedLoadImageSelection", True)
+        )
 
     def _saveReviewSourceSettings(self):
         settings = qt.QSettings()
@@ -207,6 +211,10 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         settings.setValue(
             "NpzLoader/PairedSegSuffixSelection",
             json.dumps(self._pairedSegSuffixSelection, ensure_ascii=True),
+        )
+        settings.setValue(
+            "NpzLoader/PairedLoadImageSelection",
+            bool(self._pairedLoadImageSelection),
         )
 
     @staticmethod
@@ -521,6 +529,7 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
             return
         if row >= len(self._currentDataItems):
             return
+        self._persistCurrentLoadPlanPreference()
         item = self._currentDataItems[row]
         self._currentDataItem = item
         self.ui.statusLabel.text = f"Selected: {item.data_id}"
@@ -540,7 +549,9 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         stem = base[:-len("-seg.nii.gz")]
         if stem.startswith(dataId):
             return stem[len(dataId):]
-        return ""
+        # For nested SEG directory mode, file names may not start with data_id.
+        # Use stem as a stable preference key so per-seg toggles are preserved.
+        return stem
 
     def _populatePairedLoadPlanTree(self, item: ReviewDataItem):
         tree = self.ui.loadPlanTree
@@ -554,7 +565,8 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         imgItem.setText(1, os.path.basename(item.img_path) if item.img_path else "(none)")
         imgItem.setData(0, qt.Qt.UserRole, "image")
         imgItem.setFlags(imgItem.flags() | qt.Qt.ItemIsUserCheckable)
-        imgItem.setCheckState(0, qt.Qt.Checked if item.img_path else qt.Qt.Unchecked)
+        imgEnabled = bool(item.img_path) and bool(self._pairedLoadImageSelection)
+        imgItem.setCheckState(0, qt.Qt.Checked if imgEnabled else qt.Qt.Unchecked)
 
         for segPath in item.seg_paths:
             suffix = self._extractSegSuffix(item.data_id, segPath)
@@ -569,6 +581,14 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
             segItem.setCheckState(0, qt.Qt.Checked if isEnabled else qt.Qt.Unchecked)
         tree.resizeColumnToContents(0)
 
+    def _persistCurrentLoadPlanPreference(self):
+        if not self._currentDataItem or self._currentDataItem.source_type != "paired":
+            return
+        tree = self.ui.loadPlanTree
+        if tree.topLevelItemCount <= 0:
+            return
+        self._readPairedLoadPlanSelection()
+
     def _readPairedLoadPlanSelection(self) -> tuple[bool, list[str]]:
         tree = self.ui.loadPlanTree
         loadImage = True
@@ -579,6 +599,7 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
             checked = (item.checkState(0) == qt.Qt.Checked)
             if role == "image":
                 loadImage = checked
+                self._pairedLoadImageSelection = checked
             elif role == "seg":
                 segPath = item.data(1, qt.Qt.UserRole)
                 suffix = item.data(1, qt.Qt.UserRole + 1) or ""
@@ -1138,28 +1159,55 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
                         img_path=entryPath,
                     )
 
-        segEntries: list[tuple[str, str, str]] = []
+        # (matchKey, fullPath, segStem, useMatchKeyAsDataId)
+        segEntries: list[tuple[str, str, str, bool]] = []
         if segDir and os.path.isdir(segDir):
+            # Mode A (legacy): root-level flat seg files.
+            rootSegEntries: list[tuple[str, str, str, bool]] = []
             for f in sorted(os.listdir(segDir)):
                 fullPath = os.path.join(segDir, f)
                 if not os.path.isfile(fullPath) or not f.lower().endswith("-seg.nii.gz"):
                     continue
                 segStem = f[:-len("-seg.nii.gz")]
-                segEntries.append((f, fullPath, segStem))
+                rootSegEntries.append((f, fullPath, segStem, False))
+
+            subdirs = [
+                entry for entry in sorted(os.listdir(segDir))
+                if os.path.isdir(os.path.join(segDir, entry))
+            ]
+
+            if rootSegEntries:
+                segEntries = rootSegEntries
+            elif subdirs:
+                # Mode B: when no root seg files exist, treat each first-level
+                # subdirectory name as data_id and recursively collect its seg files.
+                for entry in subdirs:
+                    subdir = os.path.join(segDir, entry)
+                    dataId = entry
+                    for root, _dirs, files in os.walk(subdir):
+                        _dirs.sort()
+                        for fname in sorted(files):
+                            if not fname.lower().endswith("-seg.nii.gz"):
+                                continue
+                            fullPath = os.path.join(root, fname)
+                            segStem = fname[:-len("-seg.nii.gz")]
+                            # segStem is still used for SEG-only fallback naming logic.
+                            # dataId is reflected by directory structure when matching.
+                            segEntries.append((dataId, fullPath, segStem, True))
 
         matchedSegFiles: set[str] = set()
         if itemsById:
             for dataId, item in itemsById.items():
                 segPaths: list[str] = []
-                for segName, segPath, _segStem in segEntries:
-                    if segName.startswith(dataId):
-                        matchedSegFiles.add(segName)
+                for segNameOrDataId, segPath, _segStem, _useMatchKeyAsDataId in segEntries:
+                    if segNameOrDataId == dataId or segNameOrDataId.startswith(dataId):
+                        matchedSegFiles.add(segPath)
                         segPaths.append(segPath)
                 item.seg_paths = segPaths
         else:
             # SEG-only mode: build data items from seg stems.
-            for segName, segPath, segStem in segEntries:
-                dataId = segStem
+            for segNameOrDataId, segPath, segStem, useMatchKeyAsDataId in segEntries:
+                dataId = segNameOrDataId if useMatchKeyAsDataId else segStem
                 item = itemsById.get(dataId)
                 if item is None:
                     item = ReviewDataItem(
@@ -1170,7 +1218,7 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
                     )
                     itemsById[dataId] = item
                 item.seg_paths.append(segPath)
-                matchedSegFiles.add(segName)
+                matchedSegFiles.add(segPath)
 
         allItems = [itemsById[k] for k in sorted(itemsById.keys())]
         withSegCount = sum(1 for item in allItems if item.seg_paths)
@@ -1663,6 +1711,41 @@ class NpzLoaderTest(ScriptedLoadableModuleTest):
             assert len(segOnlyItems) == 4
             assert segOnlyWithSeg == 4
             assert segOnlyUnmatched == 0
+
+            # Nested SEG mode: no root -seg files, use first-level folder name as data_id.
+            nestedSegDir = os.path.join(rootDir, "seg_nested")
+            os.makedirs(nestedSegDir)
+            caseC = os.path.join(nestedSegDir, "case_c")
+            caseD = os.path.join(nestedSegDir, "case_d")
+            os.makedirs(os.path.join(caseC, "sub", "deep"))
+            os.makedirs(caseD)
+            open(os.path.join(caseC, "sub", "deep", "a-seg.nii.gz"), "a", encoding="utf-8").close()
+            open(os.path.join(caseC, "b-seg.nii.gz"), "a", encoding="utf-8").close()
+            open(os.path.join(caseD, "main-seg.nii.gz"), "a", encoding="utf-8").close()
+
+            nestedSegOnlyItems, nestedSegOnlyTotal, nestedSegOnlyWithSeg, nestedSegOnlyUnmatched = (
+                logic.scanPairedDirectory(None, nestedSegDir, onlyWithSeg=False)
+            )
+            assert nestedSegOnlyTotal == 2, f"Expected 2 nested seg-only items, got {nestedSegOnlyTotal}"
+            assert len(nestedSegOnlyItems) == 2
+            assert nestedSegOnlyWithSeg == 2
+            assert nestedSegOnlyUnmatched == 0
+            nestedById = {item.data_id: item for item in nestedSegOnlyItems}
+            assert len(nestedById["case_c"].seg_paths) == 2
+            assert len(nestedById["case_d"].seg_paths) == 1
+
+            # IMG+nested SEG mode: nested seg folders are keyed by folder name.
+            open(os.path.join(imgDir, "case_c.nii.gz"), "a", encoding="utf-8").close()
+            open(os.path.join(imgDir, "case_d.nii.gz"), "a", encoding="utf-8").close()
+            nestedPairedItems, nestedPairedTotal, nestedPairedWithSeg, nestedPairedUnmatched = (
+                logic.scanPairedDirectory(imgDir, nestedSegDir, onlyWithSeg=False)
+            )
+            assert nestedPairedTotal == 4
+            assert nestedPairedWithSeg == 2
+            assert nestedPairedUnmatched == 0
+            nestedPairedById = {item.data_id: item for item in nestedPairedItems}
+            assert len(nestedPairedById["case_c"].seg_paths) == 2
+            assert len(nestedPairedById["case_d"].seg_paths) == 1
         finally:
             shutil.rmtree(rootDir, ignore_errors=True)
         self.delayDisplay("Paired scan test passed!")
