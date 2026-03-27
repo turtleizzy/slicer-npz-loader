@@ -91,17 +91,22 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         self._segAllModeIndex = 0
         self._shortcuts: list[qt.QShortcut] = []
         self._sliceViewingTool = None
+        self._sectionSplitter = None
+        self._scrollArea = None
 
     # ---- setup -------------------------------------------------------------
 
     def setup(self):
         ScriptedLoadableModuleWidget.setup(self)
         self.logic = NpzLoaderLogic()
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(0)
 
         uiPath = os.path.join(os.path.dirname(__file__), "Resources", "UI", "NpzLoader.ui")
         uiWidget = slicer.util.loadUI(uiPath)
-        self.layout.addWidget(uiWidget)
+        self._enableResizableWidth(uiWidget)
         self.ui = slicer.util.childWidgetVariables(uiWidget)
+        self._setupScrollableAndResizableLayout(uiWidget)
 
         # --- Section 1: Directory & File Selection ---
         self.ui.directorySelector.filters = ctk.ctkPathLineEdit.Dirs
@@ -141,12 +146,100 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         self.ui.wlPresetF2LineEdit.connect("editingFinished()", self._saveShortcutSettings)
         self.ui.wlPresetF3LineEdit.connect("editingFinished()", self._saveShortcutSettings)
 
-        self.layout.addStretch(1)
         self._setupShortcuts()
         self._setupSliceTool()
 
         self._updateSourceUi()
         self._refreshDataListFromSource()
+
+    def _setupScrollableAndResizableLayout(self, uiWidget):
+        """Make full module vertically scrollable with a section splitter."""
+        rootLayout = uiWidget.layout()
+        rootLayout.setContentsMargins(0, 0, 0, 0)
+        rootLayout.setSpacing(6)
+
+        # Let Data List expand vertically when the splitter allocates more height.
+        self.ui.fileList.setMaximumHeight(16777215)
+        self.ui.fileList.setMinimumHeight(80)
+        self.ui.fileList.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Expanding)
+
+        splitter = qt.QSplitter(qt.Qt.Vertical)
+        splitter.setHandleWidth(8)
+        splitter.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Expanding)
+        rootLayout.removeWidget(self.ui.fileSelectionCollapsible)
+        rootLayout.removeWidget(self.ui.loadPlanCollapsible)
+        rootLayout.removeWidget(self.ui.loadActionsCollapsible)
+        rootLayout.removeWidget(self.ui.settingsCollapsible)
+
+        self.ui.fileSelectionCollapsible.setMinimumHeight(0)
+        self.ui.fileSelectionCollapsible.setSizePolicy(
+            qt.QSizePolicy.Preferred, qt.QSizePolicy.Expanding
+        )
+        splitter.addWidget(self.ui.fileSelectionCollapsible)
+
+        lowerContainer = qt.QWidget()
+        lowerLayout = qt.QVBoxLayout(lowerContainer)
+        lowerLayout.setContentsMargins(0, 0, 0, 0)
+        lowerLayout.setSpacing(6)
+        for widget in (
+            self.ui.loadPlanCollapsible,
+            self.ui.loadActionsCollapsible,
+            self.ui.settingsCollapsible,
+        ):
+            widget.setMinimumHeight(0)
+            widget.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Maximum)
+            lowerLayout.addWidget(widget)
+        lowerLayout.addStretch(1)
+        # Keep a small reserved area so lower controls are never fully hidden,
+        # while allowing collapsed state to remain compact.
+        lowerContainer.setMinimumHeight(120)
+        lowerContainer.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Preferred)
+        splitter.addWidget(lowerContainer)
+
+        splitter.setChildrenCollapsible(False)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        splitter.setSizes([420, 320])
+        rootLayout.addWidget(splitter)
+
+        scrollArea = qt.QScrollArea()
+        scrollArea.setWidgetResizable(True)
+        scrollArea.setFrameShape(qt.QFrame.NoFrame)
+        scrollArea.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAsNeeded)
+        scrollArea.setVerticalScrollBarPolicy(qt.Qt.ScrollBarAsNeeded)
+        scrollArea.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Expanding)
+        scrollArea.setWidget(uiWidget)
+        self.layout.addWidget(scrollArea, 1)
+        self._sectionSplitter = splitter
+        self._scrollArea = scrollArea
+
+    @staticmethod
+    def _enableResizableWidth(uiWidget):
+        """Avoid large minimum-size hints preventing panel width resize."""
+        moduleWidget = uiWidget.parentWidget()
+        if moduleWidget is not None:
+            moduleWidget.setMinimumWidth(0)
+            moduleWidget.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+
+        uiWidget.setMinimumWidth(0)
+        uiWidget.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+
+        for child in uiWidget.findChildren(qt.QWidget):
+            child.setMinimumWidth(0)
+
+        # Widgets that commonly keep side panels too wide should be willing to shrink.
+        for name in (
+            "directorySelector",
+            "imgDirectorySelector",
+            "segDirectorySelector",
+            "wlPresetF1LineEdit",
+            "wlPresetF2LineEdit",
+            "wlPresetF3LineEdit",
+            "fileList",
+        ):
+            widget = uiWidget.findChild(qt.QWidget, name)
+            if widget is not None:
+                widget.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
 
     def cleanup(self):
         for shortcut in self._shortcuts:
