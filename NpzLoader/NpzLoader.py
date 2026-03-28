@@ -67,6 +67,8 @@ class ReviewDataItem:
     npz_path: Optional[str] = None
     img_path: Optional[str] = None
     seg_paths: list[str] = field(default_factory=list)
+    seg_paths_a: list[str] = field(default_factory=list)
+    seg_paths_b: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -74,9 +76,12 @@ class ReviewDataItem:
 # ---------------------------------------------------------------------------
 
 class NpzLoaderWidget(ScriptedLoadableModuleWidget):
+    # Compare layout: segmentation A on Red slice, B on Yellow; slice link syncs offset/navigation.
+    _COMPARE_VIEW_SEG_A = "Red"
+    _COMPARE_VIEW_SEG_B = "Yellow"
+    _COMPARE_SLICE_ORIENTATION = "Axial"
 
     def __init__(self, parent=None):
-        ScriptedLoadableModuleWidget.__init__(self, parent)
         self.logic = None
         self._currentKeys: list[KeyInfo] = []
         self._loadPlanGroups: list[LoadPlanGroup] = []
@@ -86,13 +91,24 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         self._currentDataItems: list[ReviewDataItem] = []
         self._currentDataItem: Optional[ReviewDataItem] = None
         self._pairedSegSuffixSelection: dict[str, bool] = {}
+        self._pairedSegSuffixSelectionA: dict[str, bool] = {}
+        self._pairedSegSuffixSelectionB: dict[str, bool] = {}
         self._pairedLoadImageSelection: bool = True
+        self._compareModeEnabled: bool = False
+        self._compareViewportActive: bool = False
+        self._preCompareLayoutId: Optional[int] = None
+        # vtkMRMLSliceCompositeNode link snapshots (0/1) for restore
+        self._preCompareSliceLinkRed: Optional[int] = None
+        self._preCompareSliceHotRed: Optional[int] = None
+        self._preCompareSliceLinkYellow: Optional[int] = None
+        self._preCompareSliceHotYellow: Optional[int] = None
         self._segSingleModeIndex = 0
         self._segAllModeIndex = 0
         self._shortcuts: list[qt.QShortcut] = []
         self._sliceViewingTool = None
         self._sectionSplitter = None
         self._scrollArea = None
+        ScriptedLoadableModuleWidget.__init__(self, parent)
 
     # ---- setup -------------------------------------------------------------
 
@@ -112,9 +128,14 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         self.ui.directorySelector.filters = ctk.ctkPathLineEdit.Dirs
         self.ui.imgDirectorySelector.filters = ctk.ctkPathLineEdit.Dirs
         self.ui.segDirectorySelector.filters = ctk.ctkPathLineEdit.Dirs
+        self.ui.segDirectoryASelector.filters = ctk.ctkPathLineEdit.Dirs
+        self.ui.segDirectoryBSelector.filters = ctk.ctkPathLineEdit.Dirs
         self.ui.directorySelector.connect("currentPathChanged(QString)", self.onDirectoryChanged)
         self.ui.imgDirectorySelector.connect("currentPathChanged(QString)", self.onPairedPathChanged)
         self.ui.segDirectorySelector.connect("currentPathChanged(QString)", self.onPairedPathChanged)
+        self.ui.segDirectoryASelector.connect("currentPathChanged(QString)", self.onPairedPathChanged)
+        self.ui.segDirectoryBSelector.connect("currentPathChanged(QString)", self.onPairedPathChanged)
+        self.ui.enableCompareCheckBox.connect("toggled(bool)", self.onCompareModeToggled)
         self.ui.sourceTypeComboBox.connect("currentIndexChanged(int)", self.onSourceTypeChanged)
         self.ui.scanButton.connect("clicked()", self.onScanPairedDirectories)
         self.ui.onlyWithSegCheckBox.connect("toggled(bool)", self.onOnlyWithSegToggled)
@@ -124,6 +145,15 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         # --- Section 2: Load plan tree ---
         self.ui.loadPlanTree.setHeaderLabels(["Property", "Value"])
         self.ui.loadPlanTree.setColumnCount(2)
+        self.ui.loadPlanTree.setMinimumHeight(0)
+        self.ui.loadPlanTree.setSizePolicy(
+            qt.QSizePolicy.Preferred, qt.QSizePolicy.Expanding
+        )
+        self.ui.loadPlanTree.setSelectionMode(qt.QAbstractItemView.ExtendedSelection)
+        self.ui.loadPlanTree.connect(
+            "itemChanged(QTreeWidgetItem*,int)", self._onLoadPlanTreeItemChanged
+        )
+        self.ui.loadPlanLayout.setStretchFactor(self.ui.loadPlanTree, 1)
         self.ui.addGroupButton.connect("clicked()", self.onAddGroup)
         self.ui.removeGroupButton.connect("clicked()", self.onRemoveGroup)
 
@@ -135,6 +165,8 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         self.ui.autoDetectCheckBox.checked = True
         self.ui.reuseplanCheckBox.checked = True
         self._loadFloatSegSettings()
+        self._loadSeg3DSettings()
+        self.ui.autoShowSeg3DCheckBox.connect("toggled(bool)", self._onAutoShowSeg3DToggled)
         self.ui.floatSegAutoThresholdCheckBox.connect(
             "toggled(bool)", self._onFloatSegAutoThresholdToggled
         )
@@ -181,15 +213,15 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         lowerLayout = qt.QVBoxLayout(lowerContainer)
         lowerLayout.setContentsMargins(0, 0, 0, 0)
         lowerLayout.setSpacing(6)
-        for widget in (
-            self.ui.loadPlanCollapsible,
-            self.ui.loadActionsCollapsible,
-            self.ui.settingsCollapsible,
-        ):
+        self.ui.loadPlanCollapsible.setMinimumHeight(0)
+        self.ui.loadPlanCollapsible.setSizePolicy(
+            qt.QSizePolicy.Preferred, qt.QSizePolicy.Expanding
+        )
+        lowerLayout.addWidget(self.ui.loadPlanCollapsible, 1)
+        for widget in (self.ui.loadActionsCollapsible, self.ui.settingsCollapsible):
             widget.setMinimumHeight(0)
             widget.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Maximum)
-            lowerLayout.addWidget(widget)
-        lowerLayout.addStretch(1)
+            lowerLayout.addWidget(widget, 0)
         # Keep a small reserved area so lower controls are never fully hidden,
         # while allowing collapsed state to remain compact.
         lowerContainer.setMinimumHeight(120)
@@ -198,7 +230,7 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
 
         splitter.setChildrenCollapsible(False)
         splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 0)
+        splitter.setStretchFactor(1, 1)
         splitter.setSizes([420, 320])
         rootLayout.addWidget(splitter)
 
@@ -232,14 +264,22 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
             "directorySelector",
             "imgDirectorySelector",
             "segDirectorySelector",
+            "segDirectoryASelector",
+            "segDirectoryBSelector",
             "wlPresetF1LineEdit",
             "wlPresetF2LineEdit",
             "wlPresetF3LineEdit",
             "fileList",
+            "loadPlanTree",
         ):
             widget = uiWidget.findChild(qt.QWidget, name)
             if widget is not None:
-                widget.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+                vpol = (
+                    qt.QSizePolicy.Expanding
+                    if name == "loadPlanTree"
+                    else qt.QSizePolicy.Preferred
+                )
+                widget.setSizePolicy(qt.QSizePolicy.Ignored, vpol)
 
     def cleanup(self):
         for shortcut in self._shortcuts:
@@ -279,6 +319,12 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         self.ui.directorySelector.currentPath = settings.value("NpzLoader/RootDirectory", "")
         self.ui.imgDirectorySelector.currentPath = settings.value("NpzLoader/ImgDirectory", "")
         self.ui.segDirectorySelector.currentPath = settings.value("NpzLoader/SegDirectory", "")
+        self.ui.segDirectoryASelector.currentPath = settings.value("NpzLoader/SegDirectoryA", "")
+        self.ui.segDirectoryBSelector.currentPath = settings.value("NpzLoader/SegDirectoryB", "")
+        self._compareModeEnabled = self._toBool(
+            settings.value("NpzLoader/CompareModeEnabled", False)
+        )
+        self.ui.enableCompareCheckBox.checked = self._compareModeEnabled
         self.ui.onlyWithSegCheckBox.checked = self._toBool(
             settings.value("NpzLoader/OnlyWithSeg", False)
         )
@@ -290,6 +336,22 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
             } if isinstance(parsed, dict) else {}
         except Exception:
             self._pairedSegSuffixSelection = {}
+        rawSuffixSelectionA = settings.value("NpzLoader/PairedSegSuffixSelectionA", "{}")
+        try:
+            parsedA = json.loads(str(rawSuffixSelectionA))
+            self._pairedSegSuffixSelectionA = {
+                str(k): bool(v) for k, v in parsedA.items()
+            } if isinstance(parsedA, dict) else {}
+        except Exception:
+            self._pairedSegSuffixSelectionA = {}
+        rawSuffixSelectionB = settings.value("NpzLoader/PairedSegSuffixSelectionB", "{}")
+        try:
+            parsedB = json.loads(str(rawSuffixSelectionB))
+            self._pairedSegSuffixSelectionB = {
+                str(k): bool(v) for k, v in parsedB.items()
+            } if isinstance(parsedB, dict) else {}
+        except Exception:
+            self._pairedSegSuffixSelectionB = {}
         self._pairedLoadImageSelection = self._toBool(
             settings.value("NpzLoader/PairedLoadImageSelection", True)
         )
@@ -300,10 +362,21 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         settings.setValue("NpzLoader/RootDirectory", self.ui.directorySelector.currentPath)
         settings.setValue("NpzLoader/ImgDirectory", self.ui.imgDirectorySelector.currentPath)
         settings.setValue("NpzLoader/SegDirectory", self.ui.segDirectorySelector.currentPath)
+        settings.setValue("NpzLoader/SegDirectoryA", self.ui.segDirectoryASelector.currentPath)
+        settings.setValue("NpzLoader/SegDirectoryB", self.ui.segDirectoryBSelector.currentPath)
+        settings.setValue("NpzLoader/CompareModeEnabled", bool(self._compareModeEnabled))
         settings.setValue("NpzLoader/OnlyWithSeg", bool(self.ui.onlyWithSegCheckBox.checked))
         settings.setValue(
             "NpzLoader/PairedSegSuffixSelection",
             json.dumps(self._pairedSegSuffixSelection, ensure_ascii=True),
+        )
+        settings.setValue(
+            "NpzLoader/PairedSegSuffixSelectionA",
+            json.dumps(self._pairedSegSuffixSelectionA, ensure_ascii=True),
+        )
+        settings.setValue(
+            "NpzLoader/PairedSegSuffixSelectionB",
+            json.dumps(self._pairedSegSuffixSelectionB, ensure_ascii=True),
         )
         settings.setValue(
             "NpzLoader/PairedLoadImageSelection",
@@ -333,6 +406,23 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
             self.logic.floatSegAutoThreshold = self.ui.floatSegAutoThresholdCheckBox.checked
             self.logic.floatSegThreshold = float(self.ui.floatSegThresholdDoubleSpinBox.value)
 
+    def _loadSeg3DSettings(self):
+        settings = qt.QSettings()
+        self.ui.autoShowSeg3DCheckBox.checked = self._toBool(
+            settings.value("NpzLoader/AutoShowSeg3D", True)
+        )
+        if self.logic:
+            self.logic.autoShowSeg3D = bool(self.ui.autoShowSeg3DCheckBox.checked)
+
+    def _saveSeg3DSettings(self):
+        settings = qt.QSettings()
+        settings.setValue(
+            "NpzLoader/AutoShowSeg3D",
+            bool(self.ui.autoShowSeg3DCheckBox.checked),
+        )
+        if self.logic:
+            self.logic.autoShowSeg3D = bool(self.ui.autoShowSeg3DCheckBox.checked)
+
     def _saveFloatSegSettings(self):
         settings = qt.QSettings()
         settings.setValue(
@@ -355,6 +445,9 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
 
     def _onFloatSegThresholdChanged(self, _value: float):
         self._saveFloatSegSettings()
+
+    def _onAutoShowSeg3DToggled(self, _checked: bool):
+        self._saveSeg3DSettings()
 
     def _setupShortcuts(self):
         mainWindow = slicer.util.mainWindow()
@@ -514,14 +607,23 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
     def _isNpzSourceMode(self) -> bool:
         return int(self.ui.sourceTypeComboBox.currentIndex) == 0
 
+    def _isCompareModeEnabled(self) -> bool:
+        return (not self._isNpzSourceMode()) and bool(self._compareModeEnabled)
+
     def _updateSourceUi(self):
         isNpz = self._isNpzSourceMode()
+        isCompare = self._isCompareModeEnabled()
         self.ui.directoryLabel.visible = isNpz
         self.ui.directorySelector.visible = isNpz
         self.ui.imgDirectoryLabel.visible = not isNpz
         self.ui.imgDirectorySelector.visible = not isNpz
-        self.ui.segDirectoryLabel.visible = not isNpz
-        self.ui.segDirectorySelector.visible = not isNpz
+        self.ui.enableCompareCheckBox.visible = not isNpz
+        self.ui.segDirectoryLabel.visible = (not isNpz) and (not isCompare)
+        self.ui.segDirectorySelector.visible = (not isNpz) and (not isCompare)
+        self.ui.segDirectoryALabel.visible = (not isNpz) and isCompare
+        self.ui.segDirectoryASelector.visible = (not isNpz) and isCompare
+        self.ui.segDirectoryBLabel.visible = (not isNpz) and isCompare
+        self.ui.segDirectoryBSelector.visible = (not isNpz) and isCompare
         self.ui.scanButton.visible = not isNpz
         self.ui.onlyWithSegCheckBox.visible = not isNpz
         self.ui.keyInfoLabel.visible = isNpz
@@ -531,12 +633,16 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         self.ui.addGroupButton.visible = isNpz
         self.ui.removeGroupButton.visible = isNpz
         self.ui.loadPlanCollapsible.text = (
-            "NPZ Key Analysis & Load Plan" if isNpz else "Paired Load Plan"
+            "NPZ Key Analysis & Load Plan"
+            if isNpz else
+            ("Paired Compare Load Plan" if isCompare else "Paired Load Plan")
         )
         self.ui.loadPlanLabel.text = (
             "Load Plan (check groups to load, edit key mappings):"
             if isNpz else
-            "Load Plan (check image/seg items to load):"
+            ("Load Plan (check image/seg(A)/seg(B) items to load):"
+             if isCompare else
+             "Load Plan (check image/seg items to load):")
         )
         self.ui.loadPlanTree.setColumnCount(2)
         if isNpz:
@@ -565,6 +671,8 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
             self.onScanPairedDirectories()
 
     def onSourceTypeChanged(self, _index: int):
+        if self._isNpzSourceMode() and self._compareViewportActive:
+            self._restoreSlicerStateFromCompare()
         self._saveReviewSourceSettings()
         self._updateSourceUi()
         self._clearPlanUi()
@@ -587,6 +695,17 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
     def onPairedPathChanged(self, _path: str):
         self._saveReviewSourceSettings()
 
+    def onCompareModeToggled(self, checked: bool):
+        wasCompare = self._compareModeEnabled
+        self._compareModeEnabled = bool(checked)
+        if wasCompare and not self._compareModeEnabled and self._compareViewportActive:
+            self._restoreSlicerStateFromCompare()
+        self._saveReviewSourceSettings()
+        self._updateSourceUi()
+        if not self._isNpzSourceMode():
+            self._clearPlanUi()
+            self.onScanPairedDirectories()
+
     def onOnlyWithSegToggled(self, _checked: bool):
         self._saveReviewSourceSettings()
         if not self._isNpzSourceMode():
@@ -599,23 +718,51 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         self._clearPlanUi()
         imgDir = self.ui.imgDirectorySelector.currentPath
         segDir = self.ui.segDirectorySelector.currentPath
+        segDirA = self.ui.segDirectoryASelector.currentPath
+        segDirB = self.ui.segDirectoryBSelector.currentPath
+        isCompare = self._isCompareModeEnabled()
         validImgDir = bool(imgDir and os.path.isdir(imgDir))
         validSegDir = bool(segDir and os.path.isdir(segDir))
-        if not validImgDir and not validSegDir:
+        validSegDirA = bool(segDirA and os.path.isdir(segDirA))
+        validSegDirB = bool(segDirB and os.path.isdir(segDirB))
+        hasAnyValidSeg = (validSegDirA or validSegDirB) if isCompare else validSegDir
+        if not validImgDir and not hasAnyValidSeg:
             self._setDataItems([])
             self.ui.statusLabel.text = "Select at least one valid IMG or SEG directory."
             return
         onlyWithSeg = bool(self.ui.onlyWithSegCheckBox.checked)
-        items, totalItems, withSegCount, unmatchedSegCount = self.logic.scanPairedDirectory(
-            imgDir if validImgDir else None,
-            segDir if validSegDir else None,
-            onlyWithSeg=onlyWithSeg,
-        )
-        self._setDataItems(items)
-        self.ui.statusLabel.text = (
-            f"Scanned paired directories: total={totalItems}, with_seg={withSegCount}, "
-            f"listed={len(items)}, unmatched_seg_files={unmatchedSegCount}"
-        )
+        if isCompare:
+            (
+                items,
+                totalItems,
+                withSegACount,
+                withSegBCount,
+                withBothCount,
+                unmatchedSegCount,
+            ) = self.logic.scanPairedCompareDirectories(
+                imgDir if validImgDir else None,
+                segDirA if validSegDirA else None,
+                segDirB if validSegDirB else None,
+                onlyWithSeg=onlyWithSeg,
+            )
+            self._setDataItems(items)
+            self.ui.statusLabel.text = (
+                "Scanned compare directories: "
+                f"total={totalItems}, with_segA={withSegACount}, with_segB={withSegBCount}, "
+                f"with_both={withBothCount}, listed={len(items)}, "
+                f"unmatched_seg_files={unmatchedSegCount}"
+            )
+        else:
+            items, totalItems, withSegCount, unmatchedSegCount = self.logic.scanPairedDirectory(
+                imgDir if validImgDir else None,
+                segDir if validSegDir else None,
+                onlyWithSeg=onlyWithSeg,
+            )
+            self._setDataItems(items)
+            self.ui.statusLabel.text = (
+                f"Scanned paired directories: total={totalItems}, with_seg={withSegCount}, "
+                f"listed={len(items)}, unmatched_seg_files={unmatchedSegCount}"
+            )
 
     def onFileSelected(self, row):
         if row < 0:
@@ -631,9 +778,15 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         else:
             self._clearPlanUi()
             self._populatePairedLoadPlanTree(item)
-            self.ui.statusLabel.text = (
-                f"Selected: {item.data_id} (paired image, seg count={len(item.seg_paths)})"
-            )
+            if self._isCompareModeEnabled():
+                self.ui.statusLabel.text = (
+                    f"Selected: {item.data_id} (paired image, segA={len(item.seg_paths_a)}, "
+                    f"segB={len(item.seg_paths_b)})"
+                )
+            else:
+                self.ui.statusLabel.text = (
+                    f"Selected: {item.data_id} (paired image, seg count={len(item.seg_paths)})"
+                )
 
     def _extractSegSuffix(self, dataId: str, segPath: str) -> str:
         base = os.path.basename(segPath)
@@ -648,30 +801,60 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
 
     def _populatePairedLoadPlanTree(self, item: ReviewDataItem):
         tree = self.ui.loadPlanTree
-        tree.clear()
         tree.setColumnCount(2)
         tree.setHeaderLabels(["Item", "Suffix"])
         self.ui.loadPlanTree.visible = True
+        isCompare = self._isCompareModeEnabled()
 
-        imgItem = qt.QTreeWidgetItem(tree)
-        imgItem.setText(0, "image")
-        imgItem.setText(1, os.path.basename(item.img_path) if item.img_path else "(none)")
-        imgItem.setData(0, qt.Qt.UserRole, "image")
-        imgItem.setFlags(imgItem.flags() | qt.Qt.ItemIsUserCheckable)
-        imgEnabled = bool(item.img_path) and bool(self._pairedLoadImageSelection)
-        imgItem.setCheckState(0, qt.Qt.Checked if imgEnabled else qt.Qt.Unchecked)
+        tree.blockSignals(True)
+        try:
+            tree.clear()
 
-        for segPath in item.seg_paths:
-            suffix = self._extractSegSuffix(item.data_id, segPath)
-            isEnabled = self._pairedSegSuffixSelection.get(suffix, True)
-            segItem = qt.QTreeWidgetItem(tree)
-            segItem.setText(0, f"seg: {os.path.basename(segPath)}")
-            segItem.setText(1, suffix if suffix else "(empty)")
-            segItem.setData(0, qt.Qt.UserRole, "seg")
-            segItem.setData(1, qt.Qt.UserRole, segPath)
-            segItem.setData(1, qt.Qt.UserRole + 1, suffix)
-            segItem.setFlags(segItem.flags() | qt.Qt.ItemIsUserCheckable)
-            segItem.setCheckState(0, qt.Qt.Checked if isEnabled else qt.Qt.Unchecked)
+            imgItem = qt.QTreeWidgetItem(tree)
+            imgItem.setText(0, "image")
+            imgItem.setText(1, os.path.basename(item.img_path) if item.img_path else "(none)")
+            imgItem.setData(0, qt.Qt.UserRole, "image")
+            imgItem.setFlags(imgItem.flags() | qt.Qt.ItemIsUserCheckable)
+            imgEnabled = bool(item.img_path) and bool(self._pairedLoadImageSelection)
+            imgItem.setCheckState(0, qt.Qt.Checked if imgEnabled else qt.Qt.Unchecked)
+
+            if isCompare:
+                for segPath in item.seg_paths_a:
+                    suffix = self._extractSegSuffix(item.data_id, segPath)
+                    isEnabled = self._pairedSegSuffixSelectionA.get(suffix, True)
+                    segItem = qt.QTreeWidgetItem(tree)
+                    segItem.setText(0, f"seg(A): {os.path.basename(segPath)}")
+                    segItem.setText(1, suffix if suffix else "(empty)")
+                    segItem.setData(0, qt.Qt.UserRole, "seg_a")
+                    segItem.setData(1, qt.Qt.UserRole, segPath)
+                    segItem.setData(1, qt.Qt.UserRole + 1, suffix)
+                    segItem.setFlags(segItem.flags() | qt.Qt.ItemIsUserCheckable)
+                    segItem.setCheckState(0, qt.Qt.Checked if isEnabled else qt.Qt.Unchecked)
+                for segPath in item.seg_paths_b:
+                    suffix = self._extractSegSuffix(item.data_id, segPath)
+                    isEnabled = self._pairedSegSuffixSelectionB.get(suffix, True)
+                    segItem = qt.QTreeWidgetItem(tree)
+                    segItem.setText(0, f"seg(B): {os.path.basename(segPath)}")
+                    segItem.setText(1, suffix if suffix else "(empty)")
+                    segItem.setData(0, qt.Qt.UserRole, "seg_b")
+                    segItem.setData(1, qt.Qt.UserRole, segPath)
+                    segItem.setData(1, qt.Qt.UserRole + 1, suffix)
+                    segItem.setFlags(segItem.flags() | qt.Qt.ItemIsUserCheckable)
+                    segItem.setCheckState(0, qt.Qt.Checked if isEnabled else qt.Qt.Unchecked)
+            else:
+                for segPath in item.seg_paths:
+                    suffix = self._extractSegSuffix(item.data_id, segPath)
+                    isEnabled = self._pairedSegSuffixSelection.get(suffix, True)
+                    segItem = qt.QTreeWidgetItem(tree)
+                    segItem.setText(0, f"seg: {os.path.basename(segPath)}")
+                    segItem.setText(1, suffix if suffix else "(empty)")
+                    segItem.setData(0, qt.Qt.UserRole, "seg")
+                    segItem.setData(1, qt.Qt.UserRole, segPath)
+                    segItem.setData(1, qt.Qt.UserRole + 1, suffix)
+                    segItem.setFlags(segItem.flags() | qt.Qt.ItemIsUserCheckable)
+                    segItem.setCheckState(0, qt.Qt.Checked if isEnabled else qt.Qt.Unchecked)
+        finally:
+            tree.blockSignals(False)
         tree.resizeColumnToContents(0)
 
     def _persistCurrentLoadPlanPreference(self):
@@ -682,10 +865,13 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
             return
         self._readPairedLoadPlanSelection()
 
-    def _readPairedLoadPlanSelection(self) -> tuple[bool, list[str]]:
+    def _readPairedLoadPlanSelection(self) -> tuple[bool, list[str], list[str]]:
         tree = self.ui.loadPlanTree
         loadImage = True
         selectedSegPaths: list[str] = []
+        selectedSegPathsA: list[str] = []
+        selectedSegPathsB: list[str] = []
+        isCompare = self._isCompareModeEnabled()
         for i in range(tree.topLevelItemCount):
             item = tree.topLevelItem(i)
             role = item.data(0, qt.Qt.UserRole)
@@ -699,8 +885,22 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
                 self._pairedSegSuffixSelection[str(suffix)] = checked
                 if checked and segPath:
                     selectedSegPaths.append(str(segPath))
+            elif role == "seg_a":
+                segPath = item.data(1, qt.Qt.UserRole)
+                suffix = item.data(1, qt.Qt.UserRole + 1) or ""
+                self._pairedSegSuffixSelectionA[str(suffix)] = checked
+                if checked and segPath:
+                    selectedSegPathsA.append(str(segPath))
+            elif role == "seg_b":
+                segPath = item.data(1, qt.Qt.UserRole)
+                suffix = item.data(1, qt.Qt.UserRole + 1) or ""
+                self._pairedSegSuffixSelectionB[str(suffix)] = checked
+                if checked and segPath:
+                    selectedSegPathsB.append(str(segPath))
+        if isCompare:
+            selectedSegPaths = selectedSegPathsA
         self._saveReviewSourceSettings()
-        return loadImage, selectedSegPaths
+        return loadImage, selectedSegPaths, selectedSegPathsB
 
     # ---- Key analysis & plan building --------------------------------------
 
@@ -738,27 +938,31 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
 
     def _populateLoadPlanTree(self):
         tree = self.ui.loadPlanTree
-        tree.clear()
         allKeyNames = ["(none)"] + [k.name for k in self._currentKeys]
 
-        for group in self._loadPlanGroups:
-            groupItem = qt.QTreeWidgetItem(tree)
-            groupItem.setText(0, f"{group.group_type}: {group.name}")
-            groupItem.setFlags(groupItem.flags() | qt.Qt.ItemIsUserCheckable)
-            groupItem.setCheckState(0, qt.Qt.Checked if group.enabled else qt.Qt.Unchecked)
+        tree.blockSignals(True)
+        try:
+            tree.clear()
 
-            for mappingKey, mappingVal in group.mappings.items():
-                childItem = qt.QTreeWidgetItem(groupItem)
-                childItem.setText(0, mappingKey)
+            for group in self._loadPlanGroups:
+                groupItem = qt.QTreeWidgetItem(tree)
+                groupItem.setText(0, f"{group.group_type}: {group.name}")
+                groupItem.setFlags(groupItem.flags() | qt.Qt.ItemIsUserCheckable)
+                groupItem.setCheckState(0, qt.Qt.Checked if group.enabled else qt.Qt.Unchecked)
 
-                combo = qt.QComboBox()
-                combo.addItems(allKeyNames)
-                idx = combo.findText(mappingVal) if mappingVal else 0
-                combo.setCurrentIndex(max(idx, 0))
-                tree.setItemWidget(childItem, 1, combo)
+                for mappingKey, mappingVal in group.mappings.items():
+                    childItem = qt.QTreeWidgetItem(groupItem)
+                    childItem.setText(0, mappingKey)
 
-            groupItem.setExpanded(True)
+                    combo = qt.QComboBox()
+                    combo.addItems(allKeyNames)
+                    idx = combo.findText(mappingVal) if mappingVal else 0
+                    combo.setCurrentIndex(max(idx, 0))
+                    tree.setItemWidget(childItem, 1, combo)
 
+                groupItem.setExpanded(True)
+        finally:
+            tree.blockSignals(False)
         tree.resizeColumnToContents(0)
 
     def _readLoadPlanFromTree(self):
@@ -775,6 +979,29 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
                 combo = tree.itemWidget(childItem, 1)
                 val = combo.currentText if combo else "(none)"
                 group.mappings[mappingKey] = val if val != "(none)" else None
+
+    def _onLoadPlanTreeItemChanged(self, item, column):
+        if column != 0:
+            return
+        if not (item.flags() & qt.Qt.ItemIsUserCheckable):
+            return
+        tree = self.ui.loadPlanTree
+        selected = tree.selectedItems()
+        if len(selected) > 1 and item in selected:
+            state = item.checkState(0)
+            tree.blockSignals(True)
+            try:
+                for other in selected:
+                    if other is item:
+                        continue
+                    if other.flags() & qt.Qt.ItemIsUserCheckable:
+                        other.setCheckState(0, state)
+            finally:
+                tree.blockSignals(False)
+        if self._currentDataItem and self._currentDataItem.source_type == "paired":
+            self._persistCurrentLoadPlanPreference()
+        elif self._loadPlanGroups:
+            self._readLoadPlanFromTree()
 
     # ---- Add / Remove groups -----------------------------------------------
 
@@ -843,7 +1070,10 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         if self._currentDataItem.source_type == "npz":
             self._loadCurrentNpzItem()
         else:
-            self._loadCurrentPairedItem()
+            if self._isCompareModeEnabled():
+                self._loadCurrentPairedCompareItem()
+            else:
+                self._loadCurrentPairedItem()
 
     def _center3DViewsAfterLoad(self):
         # Try the utility API first, then fall back to per-view reset.
@@ -960,7 +1190,7 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         item = self._currentDataItem
         warnings: list[str] = []
         loadedCount = 0
-        loadImage, selectedSegPaths = self._readPairedLoadPlanSelection()
+        loadImage, selectedSegPaths, _selectedSegPathsB = self._readPairedLoadPlanSelection()
 
         if not loadImage and not selectedSegPaths:
             slicer.util.warningDisplay("No paired items are enabled in load plan.")
@@ -991,8 +1221,298 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
             self._sliceViewingTool.onDataLoaded()
         self._center3DViewsAfterLoad()
 
+    def _getSliceCompositeLinkState(self, viewName: str) -> tuple[Optional[int], Optional[int]]:
+        """Return (linkedControl, hotLinkedControl) from slice composite, or (None, None)."""
+        layoutManager = slicer.app.layoutManager()
+        if not layoutManager:
+            return None, None
+        sliceWidget = layoutManager.sliceWidget(viewName)
+        if not sliceWidget:
+            return None, None
+        sliceLogic = sliceWidget.sliceLogic()
+        if not sliceLogic:
+            return None, None
+        compositeNode = sliceLogic.GetSliceCompositeNode()
+        if not compositeNode:
+            return None, None
+        try:
+            return int(compositeNode.GetLinkedControl()), int(compositeNode.GetHotLinkedControl())
+        except Exception:
+            return None, None
+
+    def _activateCompareViewport(self):
+        layoutManager = slicer.app.layoutManager()
+        if not layoutManager:
+            return
+        if self._preCompareLayoutId is None:
+            try:
+                self._preCompareLayoutId = int(layoutManager.layout)
+            except Exception:
+                self._preCompareLayoutId = None
+            self._preCompareSliceLinkRed, self._preCompareSliceHotRed = self._getSliceCompositeLinkState(
+                self._COMPARE_VIEW_SEG_A
+            )
+            self._preCompareSliceLinkYellow, self._preCompareSliceHotYellow = self._getSliceCompositeLinkState(
+                self._COMPARE_VIEW_SEG_B
+            )
+        compareLayoutId = getattr(
+            slicer.vtkMRMLLayoutNode,
+            "SlicerLayoutSideBySideView",
+            slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView,
+        )
+        try:
+            layoutManager.setLayout(compareLayoutId)
+        except Exception:
+            pass
+        self._compareViewportActive = True
+
+    def _applyCompareSameOrientation(self) -> None:
+        """Set Red and Yellow to the same slice orientation (default Axial) and fit."""
+        layoutManager = slicer.app.layoutManager()
+        if not layoutManager:
+            return
+        orient = self._COMPARE_SLICE_ORIENTATION
+        for viewName in (self._COMPARE_VIEW_SEG_A, self._COMPARE_VIEW_SEG_B):
+            sliceWidget = layoutManager.sliceWidget(viewName)
+            if not sliceWidget:
+                continue
+            try:
+                sliceWidget.sliceController().setSliceOrientation(orient)
+                sliceWidget.sliceController().fitSliceToBackground()
+            except Exception:
+                pass
+
+    def _syncCompareSliceOffsetSecondaryToReference(self) -> None:
+        """Align Yellow slice offset to Red before enabling MRML slice linking (same plane)."""
+        layoutManager = slicer.app.layoutManager()
+        if not layoutManager:
+            return
+        wRef = layoutManager.sliceWidget(self._COMPARE_VIEW_SEG_A)
+        wSec = layoutManager.sliceWidget(self._COMPARE_VIEW_SEG_B)
+        if not wRef or not wSec:
+            return
+        refLogic = wRef.sliceLogic()
+        secLogic = wSec.sliceLogic()
+        if not refLogic or not secLogic:
+            return
+        refNode = refLogic.GetSliceNode()
+        if not refNode:
+            return
+        off = refNode.GetSliceOffset()
+        try:
+            # Same flag as SliceLinkLogic test for slice offset broadcast.
+            secLogic.StartSliceNodeInteraction(1)
+            secLogic.SetSliceOffset(off)
+            secLogic.EndSliceNodeInteraction()
+        except Exception:
+            pass
+
+    def _applyCompareSliceLinking(self):
+        """Enable MRML + UI slice linking on Red/Yellow (offset slider, pan/zoom per Slicer link rules)."""
+        layoutManager = slicer.app.layoutManager()
+        if not layoutManager:
+            return
+        for viewName in (self._COMPARE_VIEW_SEG_A, self._COMPARE_VIEW_SEG_B):
+            sliceWidget = layoutManager.sliceWidget(viewName)
+            if not sliceWidget:
+                continue
+            sliceLogic = sliceWidget.sliceLogic()
+            compositeNode = sliceLogic.GetSliceCompositeNode() if sliceLogic else None
+            if compositeNode:
+                try:
+                    compositeNode.SetLinkedControl(1)
+                    compositeNode.SetHotLinkedControl(1)
+                except Exception:
+                    pass
+            try:
+                ctrl = sliceWidget.sliceController()
+                ctrl.setSliceLink(True)
+                ctrl.setHotLinked(True)
+            except Exception:
+                pass
+
+    def _restoreCompareSliceLinkUiAndComposite(self, layoutManager) -> None:
+        """Restore pre-compare linked/hot state on composite nodes and slice controllers."""
+        def restore_one(
+            viewName: str,
+            linked: Optional[int],
+            hot: Optional[int],
+        ) -> None:
+            w = layoutManager.sliceWidget(viewName)
+            if not w:
+                return
+            sl = w.sliceLogic()
+            cn = sl.GetSliceCompositeNode() if sl else None
+            if cn is not None:
+                if linked is not None:
+                    try:
+                        cn.SetLinkedControl(int(linked))
+                    except Exception:
+                        pass
+                if hot is not None:
+                    try:
+                        cn.SetHotLinkedControl(int(hot))
+                    except Exception:
+                        pass
+            try:
+                ctrl = w.sliceController()
+                if linked is not None:
+                    ctrl.setSliceLink(bool(linked))
+                if hot is not None:
+                    ctrl.setHotLinked(bool(hot))
+            except Exception:
+                pass
+
+        restore_one(
+            self._COMPARE_VIEW_SEG_A,
+            self._preCompareSliceLinkRed,
+            self._preCompareSliceHotRed,
+        )
+        restore_one(
+            self._COMPARE_VIEW_SEG_B,
+            self._preCompareSliceLinkYellow,
+            self._preCompareSliceHotYellow,
+        )
+
+    def _restoreSlicerStateFromCompare(self):
+        if not self._compareViewportActive:
+            return
+        layoutManager = slicer.app.layoutManager()
+        if layoutManager and self._preCompareLayoutId is not None:
+            try:
+                layoutManager.setLayout(int(self._preCompareLayoutId))
+            except Exception:
+                pass
+        if layoutManager:
+            self._restoreCompareSliceLinkUiAndComposite(layoutManager)
+        self._compareViewportActive = False
+        self._preCompareLayoutId = None
+        self._preCompareSliceLinkRed = None
+        self._preCompareSliceHotRed = None
+        self._preCompareSliceLinkYellow = None
+        self._preCompareSliceHotYellow = None
+
+    def _bindCompareNodesToViews(
+        self,
+        volumeNodeId: Optional[str],
+        segNodeIdsA: list[str],
+        segNodeIdsB: list[str],
+    ):
+        viewNameA = self._COMPARE_VIEW_SEG_A
+        viewNameB = self._COMPARE_VIEW_SEG_B
+        layoutManager = slicer.app.layoutManager()
+        if not layoutManager:
+            return
+        for viewName in (viewNameA, viewNameB):
+            sliceWidget = layoutManager.sliceWidget(viewName)
+            if not sliceWidget:
+                continue
+            sliceLogic = sliceWidget.sliceLogic()
+            if not sliceLogic:
+                continue
+            compositeNode = sliceLogic.GetSliceCompositeNode()
+            if compositeNode and volumeNodeId:
+                compositeNode.SetBackgroundVolumeID(volumeNodeId)
+
+        self._applyCompareSameOrientation()
+        self._syncCompareSliceOffsetSecondaryToReference()
+
+        viewNodeIdA = None
+        viewNodeIdB = None
+        wA = layoutManager.sliceWidget(viewNameA)
+        if wA:
+            viewNodeIdA = wA.mrmlSliceNode().GetID()
+        wB = layoutManager.sliceWidget(viewNameB)
+        if wB:
+            viewNodeIdB = wB.mrmlSliceNode().GetID()
+
+        for segNodeId in segNodeIdsA:
+            segNode = slicer.mrmlScene.GetNodeByID(segNodeId)
+            if not segNode:
+                continue
+            displayNode = segNode.GetDisplayNode()
+            if not displayNode:
+                continue
+            if viewNodeIdA:
+                displayNode.SetViewNodeIDs([viewNodeIdA])
+            displayNode.SetVisibility(True)
+            displayNode.SetVisibility2DFill(True)
+            displayNode.SetVisibility2DOutline(False)
+        for segNodeId in segNodeIdsB:
+            segNode = slicer.mrmlScene.GetNodeByID(segNodeId)
+            if not segNode:
+                continue
+            displayNode = segNode.GetDisplayNode()
+            if not displayNode:
+                continue
+            if viewNodeIdB:
+                displayNode.SetViewNodeIDs([viewNodeIdB])
+            displayNode.SetVisibility(True)
+            displayNode.SetVisibility2DFill(True)
+            displayNode.SetVisibility2DOutline(False)
+
+        self._applyCompareSliceLinking()
+
+    def _loadCurrentPairedCompareItem(self):
+        if not self._currentDataItem:
+            slicer.util.warningDisplay("No paired data item selected.")
+            return
+
+        self._clearNodes()
+        self._segSingleModeIndex = 0
+        self._segAllModeIndex = 0
+
+        item = self._currentDataItem
+        warnings: list[str] = []
+        loadedCount = 0
+        loadImage, selectedSegPathsA, selectedSegPathsB = self._readPairedLoadPlanSelection()
+        if not loadImage and not selectedSegPathsA and not selectedSegPathsB:
+            slicer.util.warningDisplay("No compare items are enabled in load plan.")
+            return
+
+        self._activateCompareViewport()
+
+        volumeNodeId: Optional[str] = None
+        if loadImage and item.img_path:
+            try:
+                volumeNodeId = self.logic.loadPairedImage(item.img_path, item.data_id)
+                self._loadedNodeIds.append(volumeNodeId)
+                self._loadedVolumeNodeIds.append(volumeNodeId)
+                loadedCount += 1
+            except Exception as e:
+                slicer.util.errorDisplay(f"Failed to load paired image for '{item.data_id}':\n{e}")
+                return
+
+        segNodeIdsA, segWarningsA = self.logic.loadPairedSegmentations(
+            selectedSegPathsA, f"{item.data_id}_A"
+        )
+        segNodeIdsB, segWarningsB = self.logic.loadPairedSegmentations(
+            selectedSegPathsB, f"{item.data_id}_B"
+        )
+        self._loadedNodeIds.extend(segNodeIdsA)
+        self._loadedNodeIds.extend(segNodeIdsB)
+        self._loadedSegmentationNodeIds.extend(segNodeIdsA)
+        self._loadedSegmentationNodeIds.extend(segNodeIdsB)
+        loadedCount += len(segNodeIdsA) + len(segNodeIdsB)
+        warnings.extend(segWarningsA)
+        warnings.extend(segWarningsB)
+
+        self._bindCompareNodesToViews(volumeNodeId, segNodeIdsA, segNodeIdsB)
+
+        if warnings:
+            slicer.util.warningDisplay("\n".join(warnings))
+        self.ui.statusLabel.text = (
+            f"Loaded compare item: {item.data_id} "
+            f"(nodes={loadedCount}, segA={len(segNodeIdsA)}, segB={len(segNodeIdsB)})"
+        )
+        if self._sliceViewingTool:
+            self._sliceViewingTool.onDataLoaded()
+        self._center3DViewsAfterLoad()
+
     def onClose(self):
         self._clearNodes()
+        if self._compareViewportActive:
+            self._restoreSlicerStateFromCompare()
         self.ui.statusLabel.text = "Scene cleared."
 
     def _clearNodes(self):
@@ -1047,6 +1567,8 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
         self.floatSegNearIntFraction: float = 0.95
         self.floatSegIn01Fraction: float = 0.9
         self._supportedImageExtensions = (".nii", ".nii.gz", ".nrrd", ".mhd")
+        # Match Segmentation module "Show 3D" after load (see PROJECT_KNOWHOW.md).
+        self.autoShowSeg3D: bool = True
 
     # ---- Key analysis ------------------------------------------------------
 
@@ -1231,94 +1753,162 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
     def scanPairedDirectory(
         self, imgDir: Optional[str], segDir: Optional[str], onlyWithSeg: bool = False
     ) -> tuple[list[ReviewDataItem], int, int, int]:
-        itemsById: dict[str, ReviewDataItem] = {}
-
-        if imgDir and os.path.isdir(imgDir):
-            for entry in sorted(os.listdir(imgDir)):
-                entryPath = os.path.join(imgDir, entry)
-                if os.path.isdir(entryPath):
-                    itemsById[entry] = ReviewDataItem(
-                        data_id=entry,
-                        source_type="paired",
-                        img_path=entryPath,
-                    )
-                    continue
-                lower = entry.lower()
-                if lower.endswith(self._supportedImageExtensions):
-                    dataId = self._stripKnownImageSuffix(entry)
-                    itemsById[dataId] = ReviewDataItem(
-                        data_id=dataId,
-                        source_type="paired",
-                        img_path=entryPath,
-                    )
-
-        # (matchKey, fullPath, segStem, useMatchKeyAsDataId)
-        segEntries: list[tuple[str, str, str, bool]] = []
-        if segDir and os.path.isdir(segDir):
-            # Mode A (legacy): root-level flat seg files.
-            rootSegEntries: list[tuple[str, str, str, bool]] = []
-            for f in sorted(os.listdir(segDir)):
-                fullPath = os.path.join(segDir, f)
-                if not os.path.isfile(fullPath) or not f.lower().endswith("-seg.nii.gz"):
-                    continue
-                segStem = f[:-len("-seg.nii.gz")]
-                rootSegEntries.append((f, fullPath, segStem, False))
-
-            subdirs = [
-                entry for entry in sorted(os.listdir(segDir))
-                if os.path.isdir(os.path.join(segDir, entry))
-            ]
-
-            if rootSegEntries:
-                segEntries = rootSegEntries
-            elif subdirs:
-                # Mode B: when no root seg files exist, treat each first-level
-                # subdirectory name as data_id and recursively collect its seg files.
-                for entry in subdirs:
-                    subdir = os.path.join(segDir, entry)
-                    dataId = entry
-                    for root, _dirs, files in os.walk(subdir):
-                        _dirs.sort()
-                        for fname in sorted(files):
-                            if not fname.lower().endswith("-seg.nii.gz"):
-                                continue
-                            fullPath = os.path.join(root, fname)
-                            segStem = fname[:-len("-seg.nii.gz")]
-                            # segStem is still used for SEG-only fallback naming logic.
-                            # dataId is reflected by directory structure when matching.
-                            segEntries.append((dataId, fullPath, segStem, True))
-
-        matchedSegFiles: set[str] = set()
-        if itemsById:
-            for dataId, item in itemsById.items():
-                segPaths: list[str] = []
-                for segNameOrDataId, segPath, _segStem, _useMatchKeyAsDataId in segEntries:
-                    if segNameOrDataId == dataId or segNameOrDataId.startswith(dataId):
-                        matchedSegFiles.add(segPath)
-                        segPaths.append(segPath)
-                item.seg_paths = segPaths
-        else:
-            # SEG-only mode: build data items from seg stems.
-            for segNameOrDataId, segPath, segStem, useMatchKeyAsDataId in segEntries:
-                dataId = segNameOrDataId if useMatchKeyAsDataId else segStem
-                item = itemsById.get(dataId)
-                if item is None:
-                    item = ReviewDataItem(
-                        data_id=dataId,
-                        source_type="paired",
-                        img_path=None,
-                        seg_paths=[],
-                    )
-                    itemsById[dataId] = item
-                item.seg_paths.append(segPath)
-                matchedSegFiles.add(segPath)
+        itemsById = self._collectImageItems(imgDir)
+        segEntries = self._collectSegEntries(segDir)
+        self._assignSegEntriesToItems(itemsById, segEntries, target_attr="seg_paths")
 
         allItems = [itemsById[k] for k in sorted(itemsById.keys())]
         withSegCount = sum(1 for item in allItems if item.seg_paths)
         listedItems = [item for item in allItems if (item.seg_paths or not onlyWithSeg)]
 
-        unmatchedSegCount = len(segEntries) - len(matchedSegFiles)
+        unmatchedSegCount = self._computeUnmatchedSegCount(itemsById, segEntries, "seg_paths")
         return listedItems, len(allItems), withSegCount, unmatchedSegCount
+
+    def scanPairedCompareDirectories(
+        self,
+        imgDir: Optional[str],
+        segDirA: Optional[str],
+        segDirB: Optional[str],
+        onlyWithSeg: bool = False,
+    ) -> tuple[list[ReviewDataItem], int, int, int, int, int]:
+        itemsById = self._collectImageItems(imgDir)
+        hasImageItems = bool(itemsById)
+        segEntriesA = self._collectSegEntries(segDirA)
+        segEntriesB = self._collectSegEntries(segDirB)
+        self._assignSegEntriesToItems(
+            itemsById,
+            segEntriesA,
+            target_attr="seg_paths_a",
+            allowCreateMissing=(not hasImageItems),
+        )
+        self._assignSegEntriesToItems(
+            itemsById,
+            segEntriesB,
+            target_attr="seg_paths_b",
+            allowCreateMissing=(not hasImageItems),
+        )
+
+        allItems = [itemsById[k] for k in sorted(itemsById.keys())]
+        withSegACount = sum(1 for item in allItems if item.seg_paths_a)
+        withSegBCount = sum(1 for item in allItems if item.seg_paths_b)
+        withBothCount = sum(1 for item in allItems if item.seg_paths_a and item.seg_paths_b)
+        listedItems = [
+            item for item in allItems
+            if (item.seg_paths_a or item.seg_paths_b or not onlyWithSeg)
+        ]
+        unmatchedSegACount = self._computeUnmatchedSegCount(itemsById, segEntriesA, "seg_paths_a")
+        unmatchedSegBCount = self._computeUnmatchedSegCount(itemsById, segEntriesB, "seg_paths_b")
+        return (
+            listedItems,
+            len(allItems),
+            withSegACount,
+            withSegBCount,
+            withBothCount,
+            unmatchedSegACount + unmatchedSegBCount,
+        )
+
+    def _collectImageItems(self, imgDir: Optional[str]) -> dict[str, ReviewDataItem]:
+        itemsById: dict[str, ReviewDataItem] = {}
+        if not (imgDir and os.path.isdir(imgDir)):
+            return itemsById
+
+        for entry in sorted(os.listdir(imgDir)):
+            entryPath = os.path.join(imgDir, entry)
+            if os.path.isdir(entryPath):
+                itemsById[entry] = ReviewDataItem(
+                    data_id=entry,
+                    source_type="paired",
+                    img_path=entryPath,
+                )
+                continue
+            lower = entry.lower()
+            if lower.endswith(self._supportedImageExtensions):
+                dataId = self._stripKnownImageSuffix(entry)
+                itemsById[dataId] = ReviewDataItem(
+                    data_id=dataId,
+                    source_type="paired",
+                    img_path=entryPath,
+                )
+        return itemsById
+
+    def _collectSegEntries(self, segDir: Optional[str]) -> list[tuple[str, str, str, bool]]:
+        # (matchKey, fullPath, segStem, useMatchKeyAsDataId)
+        segEntries: list[tuple[str, str, str, bool]] = []
+        if not (segDir and os.path.isdir(segDir)):
+            return segEntries
+
+        rootSegEntries: list[tuple[str, str, str, bool]] = []
+        for f in sorted(os.listdir(segDir)):
+            fullPath = os.path.join(segDir, f)
+            if not os.path.isfile(fullPath) or not f.lower().endswith("-seg.nii.gz"):
+                continue
+            segStem = f[:-len("-seg.nii.gz")]
+            rootSegEntries.append((f, fullPath, segStem, False))
+
+        subdirs = [
+            entry for entry in sorted(os.listdir(segDir))
+            if os.path.isdir(os.path.join(segDir, entry))
+        ]
+
+        if rootSegEntries:
+            return rootSegEntries
+        if subdirs:
+            for entry in subdirs:
+                subdir = os.path.join(segDir, entry)
+                dataId = entry
+                for root, _dirs, files in os.walk(subdir):
+                    _dirs.sort()
+                    for fname in sorted(files):
+                        if not fname.lower().endswith("-seg.nii.gz"):
+                            continue
+                        fullPath = os.path.join(root, fname)
+                        segStem = fname[:-len("-seg.nii.gz")]
+                        segEntries.append((dataId, fullPath, segStem, True))
+        return segEntries
+
+    @staticmethod
+    def _assignSegEntriesToItems(
+        itemsById: dict[str, ReviewDataItem],
+        segEntries: list[tuple[str, str, str, bool]],
+        target_attr: str,
+        allowCreateMissing: bool = False,
+    ) -> None:
+        if itemsById and not allowCreateMissing:
+            for dataId, item in itemsById.items():
+                segPaths: list[str] = []
+                for segNameOrDataId, segPath, _segStem, _useMatchKeyAsDataId in segEntries:
+                    if segNameOrDataId == dataId or segNameOrDataId.startswith(dataId):
+                        segPaths.append(segPath)
+                setattr(item, target_attr, segPaths)
+            return
+
+        for segNameOrDataId, segPath, segStem, useMatchKeyAsDataId in segEntries:
+            dataId = segNameOrDataId if useMatchKeyAsDataId else segStem
+            item = itemsById.get(dataId)
+            if item is None:
+                item = ReviewDataItem(
+                    data_id=dataId,
+                    source_type="paired",
+                    img_path=None,
+                )
+                itemsById[dataId] = item
+            getattr(item, target_attr).append(segPath)
+
+    @staticmethod
+    def _computeUnmatchedSegCount(
+        itemsById: dict[str, ReviewDataItem],
+        segEntries: list[tuple[str, str, str, bool]],
+        source_attr: str,
+    ) -> int:
+        if not segEntries:
+            return 0
+        if not itemsById:
+            return 0
+        matched: set[str] = set()
+        for item in itemsById.values():
+            for segPath in getattr(item, source_attr):
+                matched.add(str(segPath))
+        return len(segEntries) - len(matched)
 
     # ---- File loading ------------------------------------------------------
 
@@ -1368,8 +1958,14 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
         slicer.util.setSliceViewerLayers(background=volumeNode, fit=True)
         return volumeNode.GetID()
 
-    @staticmethod
-    def loadPairedSegmentations(segPaths: list[str], baseName: str) -> tuple[list[str], list[str]]:
+    def _applySegDisplayNodeShow3DPreference(self, segDisplayNode) -> None:
+        if not segDisplayNode:
+            return
+        segDisplayNode.SetPreferredDisplayRepresentationName3D("Closed surface")
+        segDisplayNode.SetVisibility(True)
+        segDisplayNode.SetVisibility3D(bool(self.autoShowSeg3D))
+
+    def loadPairedSegmentations(self, segPaths: list[str], baseName: str) -> tuple[list[str], list[str]]:
         segNodeIds: list[str] = []
         warnings: list[str] = []
         for segPath in segPaths:
@@ -1384,10 +1980,7 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
                 segNode.CreateClosedSurfaceRepresentation()
                 segNode.CreateDefaultDisplayNodes()
                 segDisplayNode = segNode.GetDisplayNode()
-                if segDisplayNode:
-                    segDisplayNode.SetPreferredDisplayRepresentationName3D("Closed surface")
-                    segDisplayNode.SetVisibility(True)
-                    segDisplayNode.SetVisibility3D(True)
+                self._applySegDisplayNodeShow3DPreference(segDisplayNode)
                 segNodeIds.append(segNode.GetID())
             except Exception as e:
                 warnings.append(f"Failed to load segmentation '{segPath}': {e}")
@@ -1602,10 +2195,7 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
         segNode.CreateClosedSurfaceRepresentation()
         segNode.CreateDefaultDisplayNodes()
         segDisplayNode = segNode.GetDisplayNode()
-        if segDisplayNode:
-            segDisplayNode.SetPreferredDisplayRepresentationName3D("Closed surface")
-            segDisplayNode.SetVisibility(True)
-            segDisplayNode.SetVisibility3D(True)
+        self._applySegDisplayNodeShow3DPreference(segDisplayNode)
 
         slicer.mrmlScene.RemoveNode(labelmapNode)
 
@@ -1654,10 +2244,7 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
         segNode.CreateClosedSurfaceRepresentation()
         segNode.CreateDefaultDisplayNodes()
         segDisplayNode = segNode.GetDisplayNode()
-        if segDisplayNode:
-            segDisplayNode.SetPreferredDisplayRepresentationName3D("Closed surface")
-            segDisplayNode.SetVisibility(True)
-            segDisplayNode.SetVisibility3D(True)
+        self._applySegDisplayNodeShow3DPreference(segDisplayNode)
 
         slicer.mrmlScene.RemoveNode(labelmapNode)
 
@@ -1839,6 +2426,39 @@ class NpzLoaderTest(ScriptedLoadableModuleTest):
             nestedPairedById = {item.data_id: item for item in nestedPairedItems}
             assert len(nestedPairedById["case_c"].seg_paths) == 2
             assert len(nestedPairedById["case_d"].seg_paths) == 1
+
+            # Compare scan with two separate SEG roots.
+            segDirA = os.path.join(rootDir, "seg_a")
+            segDirB = os.path.join(rootDir, "seg_b")
+            os.makedirs(segDirA)
+            os.makedirs(segDirB)
+            open(os.path.join(segDirA, "case_a-main-seg.nii.gz"), "a", encoding="utf-8").close()
+            open(os.path.join(segDirA, "case_b-main-seg.nii.gz"), "a", encoding="utf-8").close()
+            open(os.path.join(segDirB, "case_a-review-seg.nii.gz"), "a", encoding="utf-8").close()
+            open(os.path.join(segDirB, "case_x-orphan-seg.nii.gz"), "a", encoding="utf-8").close()
+
+            compareItems, compareTotal, withSegA, withSegB, withBoth, compareUnmatched = (
+                logic.scanPairedCompareDirectories(imgDir, segDirA, segDirB, onlyWithSeg=False)
+            )
+            assert compareTotal == 4
+            assert len(compareItems) == 4
+            assert withSegA == 2
+            assert withSegB == 1
+            assert withBoth == 1
+            assert compareUnmatched == 1
+            compareById = {item.data_id: item for item in compareItems}
+            assert len(compareById["case_a"].seg_paths_a) == 1
+            assert len(compareById["case_a"].seg_paths_b) == 1
+            assert len(compareById["case_b"].seg_paths_a) == 1
+            assert len(compareById["case_b"].seg_paths_b) == 0
+
+            # Compare SEG-only mode should merge IDs from both roots.
+            compareSegOnlyItems, compareSegOnlyTotal, _, _, compareSegOnlyBoth, _ = (
+                logic.scanPairedCompareDirectories(None, segDirA, segDirB, onlyWithSeg=False)
+            )
+            assert compareSegOnlyTotal == 3
+            assert len(compareSegOnlyItems) == 3
+            assert compareSegOnlyBoth == 1
         finally:
             shutil.rmtree(rootDir, ignore_errors=True)
         self.delayDisplay("Paired scan test passed!")

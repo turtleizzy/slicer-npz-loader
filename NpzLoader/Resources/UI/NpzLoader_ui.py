@@ -75,6 +75,32 @@ class Ui_NpzLoader(object):
 
         self.dirFormLayout.setWidget(3, QFormLayout.FieldRole, self.segDirectorySelector)
 
+        self.enableCompareCheckBox = QCheckBox(self.fileSelectionCollapsible)
+        self.enableCompareCheckBox.setObjectName(u"enableCompareCheckBox")
+        self.enableCompareCheckBox.setChecked(False)
+
+        self.dirFormLayout.setWidget(4, QFormLayout.FieldRole, self.enableCompareCheckBox)
+
+        self.segDirectoryALabel = QLabel(self.fileSelectionCollapsible)
+        self.segDirectoryALabel.setObjectName(u"segDirectoryALabel")
+
+        self.dirFormLayout.setWidget(5, QFormLayout.LabelRole, self.segDirectoryALabel)
+
+        self.segDirectoryASelector = ctkPathLineEdit(self.fileSelectionCollapsible)
+        self.segDirectoryASelector.setObjectName(u"segDirectoryASelector")
+
+        self.dirFormLayout.setWidget(5, QFormLayout.FieldRole, self.segDirectoryASelector)
+
+        self.segDirectoryBLabel = QLabel(self.fileSelectionCollapsible)
+        self.segDirectoryBLabel.setObjectName(u"segDirectoryBLabel")
+
+        self.dirFormLayout.setWidget(6, QFormLayout.LabelRole, self.segDirectoryBLabel)
+
+        self.segDirectoryBSelector = ctkPathLineEdit(self.fileSelectionCollapsible)
+        self.segDirectoryBSelector.setObjectName(u"segDirectoryBSelector")
+
+        self.dirFormLayout.setWidget(6, QFormLayout.FieldRole, self.segDirectoryBSelector)
+
         self.pairedControlsLayout = QHBoxLayout()
         self.pairedControlsLayout.setObjectName(u"pairedControlsLayout")
         self.onlyWithSegCheckBox = QCheckBox(self.fileSelectionCollapsible)
@@ -89,7 +115,7 @@ class Ui_NpzLoader(object):
         self.pairedControlsLayout.addWidget(self.scanButton)
 
 
-        self.dirFormLayout.setLayout(4, QFormLayout.FieldRole, self.pairedControlsLayout)
+        self.dirFormLayout.setLayout(7, QFormLayout.FieldRole, self.pairedControlsLayout)
 
 
         self.fileSelectionLayout.addLayout(self.dirFormLayout)
@@ -132,7 +158,13 @@ class Ui_NpzLoader(object):
 
         self.loadPlanTree = QTreeWidget(self.loadPlanCollapsible)
         self.loadPlanTree.setObjectName(u"loadPlanTree")
-        self.loadPlanTree.setMinimumSize(QSize(0, 160))
+        self.loadPlanTree.setMinimumSize(QSize(0, 0))
+        sizePolicy = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        sizePolicy.setHorizontalStretch(0)
+        sizePolicy.setVerticalStretch(0)
+        sizePolicy.setHeightForWidth(self.loadPlanTree.sizePolicy().hasHeightForWidth())
+        self.loadPlanTree.setSizePolicy(sizePolicy)
+        self.loadPlanTree.setSelectionMode(QAbstractItemView.ExtendedSelection)
 
         self.loadPlanLayout.addWidget(self.loadPlanTree)
 
@@ -201,6 +233,12 @@ class Ui_NpzLoader(object):
         self.reuseplanCheckBox.setChecked(True)
 
         self.settingsLayout.addWidget(self.reuseplanCheckBox)
+
+        self.autoShowSeg3DCheckBox = QCheckBox(self.settingsCollapsible)
+        self.autoShowSeg3DCheckBox.setObjectName(u"autoShowSeg3DCheckBox")
+        self.autoShowSeg3DCheckBox.setChecked(True)
+
+        self.settingsLayout.addWidget(self.autoShowSeg3DCheckBox)
 
         self.floatSegAutoThresholdCheckBox = QCheckBox(self.settingsCollapsible)
         self.floatSegAutoThresholdCheckBox.setObjectName(u"floatSegAutoThresholdCheckBox")
@@ -301,6 +339,18 @@ class Ui_NpzLoader(object):
 #if QT_CONFIG(tooltip)
         self.segDirectorySelector.setToolTip(QCoreApplication.translate("NpzLoader", u"Select segmentation directory for paired mode", None))
 #endif // QT_CONFIG(tooltip)
+        self.enableCompareCheckBox.setText(QCoreApplication.translate("NpzLoader", u"Enable Compare Mode", None))
+#if QT_CONFIG(tooltip)
+        self.enableCompareCheckBox.setToolTip(QCoreApplication.translate("NpzLoader", u"Switch paired mode UI to compare one image with two segmentation roots", None))
+#endif // QT_CONFIG(tooltip)
+        self.segDirectoryALabel.setText(QCoreApplication.translate("NpzLoader", u"SEG A Directory:", None))
+#if QT_CONFIG(tooltip)
+        self.segDirectoryASelector.setToolTip(QCoreApplication.translate("NpzLoader", u"Select segmentation directory A for compare mode", None))
+#endif // QT_CONFIG(tooltip)
+        self.segDirectoryBLabel.setText(QCoreApplication.translate("NpzLoader", u"SEG B Directory:", None))
+#if QT_CONFIG(tooltip)
+        self.segDirectoryBSelector.setToolTip(QCoreApplication.translate("NpzLoader", u"Select segmentation directory B for compare mode", None))
+#endif // QT_CONFIG(tooltip)
         self.onlyWithSegCheckBox.setText(QCoreApplication.translate("NpzLoader", u"Only show data with seg", None))
         self.scanButton.setText(QCoreApplication.translate("NpzLoader", u"Scan", None))
 #if QT_CONFIG(tooltip)
@@ -314,7 +364,7 @@ class Ui_NpzLoader(object):
         self.keyInfoLabel.setText(QCoreApplication.translate("NpzLoader", u"Detected Keys:", None))
         self.loadPlanLabel.setText(QCoreApplication.translate("NpzLoader", u"Load Plan (check groups to load, edit key mappings):", None))
 #if QT_CONFIG(tooltip)
-        self.loadPlanTree.setToolTip(QCoreApplication.translate("NpzLoader", u"Configure which data to load and key mappings", None))
+        self.loadPlanTree.setToolTip(QCoreApplication.translate("NpzLoader", u"Configure which data to load and key mappings. Ctrl/Shift+click for multi-select; toggling one checkbox applies to all selected rows.", None))
 #endif // QT_CONFIG(tooltip)
         self.addGroupButton.setText(QCoreApplication.translate("NpzLoader", u"Add Group", None))
 #if QT_CONFIG(tooltip)
@@ -337,6 +387,10 @@ class Ui_NpzLoader(object):
         self.settingsCollapsible.setText(QCoreApplication.translate("NpzLoader", u"Settings", None))
         self.autoDetectCheckBox.setText(QCoreApplication.translate("NpzLoader", u"Auto-detect load plan for each file", None))
         self.reuseplanCheckBox.setText(QCoreApplication.translate("NpzLoader", u"Reuse last load plan for files with matching keys", None))
+        self.autoShowSeg3DCheckBox.setText(QCoreApplication.translate("NpzLoader", u"Automatically enable segmentation Show 3D after load", None))
+#if QT_CONFIG(tooltip)
+        self.autoShowSeg3DCheckBox.setToolTip(QCoreApplication.translate("NpzLoader", u"When checked, loaded segmentations are shown in the 3D view (Segmentations module Show 3D). When unchecked, 3D visibility stays off.", None))
+#endif // QT_CONFIG(tooltip)
         self.floatSegAutoThresholdCheckBox.setText(QCoreApplication.translate("NpzLoader", u"Auto-convert float seg masks (0-1 -> threshold)", None))
         self.floatSegThresholdLabel.setText(QCoreApplication.translate("NpzLoader", u"Float seg threshold (0-1):", None))
 #if QT_CONFIG(tooltip)

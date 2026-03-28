@@ -125,7 +125,9 @@ class SliceViewingToolController:
         action = qt.QAction("Slice Viewing Tool", mouseToolbar)
         action.setCheckable(True)
         action.setChecked(self.enabled)
-        action.setToolTip("Left: slice, Right: WC/WL, Middle: pan, Left+Right: zoom, Wheel: slice.")
+        action.setToolTip(
+            "Left: slice, Right: WC/WL, Middle: zoom, Left+Right: pan, Wheel: slice."
+        )
         iconPath = os.path.join(self.module_dir, "Resources", "Icons", "SliceViewingTool.svg")
         if os.path.exists(iconPath):
             action.setIcon(qt.QIcon(iconPath))
@@ -267,6 +269,29 @@ class SliceViewingToolController:
         except Exception:
             return None
 
+    @staticmethod
+    def _setSliceNodeOriginLinked(sliceLogic, sliceNode, x: float, y: float, z: float) -> None:
+        """Pan: bracket origin updates so slice link broadcasts (SliceLinkLogic: flag 32 + SetSliceOrigin)."""
+        try:
+            sliceLogic.StartSliceNodeInteraction(32)  # XYZOriginFlag
+            sliceNode.SetSliceOrigin(x, y, z)
+            sliceLogic.EndSliceNodeInteraction()
+        except Exception:
+            try:
+                sliceNode.SetSliceOrigin(x, y, z)
+            except Exception:
+                sliceNode.SetXYZOrigin(x, y, z)
+
+    @staticmethod
+    def _setSliceNodeFieldOfViewLinked(sliceLogic, sliceNode, fovX: float, fovY: float, fovZ: float) -> None:
+        """Zoom: bracket FOV updates (SliceLinkLogic uses flag 2)."""
+        try:
+            sliceLogic.StartSliceNodeInteraction(2)  # FieldOfViewFlag
+            sliceNode.SetFieldOfView(fovX, fovY, fovZ)
+            sliceLogic.EndSliceNodeInteraction()
+        except Exception:
+            sliceNode.SetFieldOfView(fovX, fovY, fovZ)
+
     def _processEvent(self, interactor, event):
         if not self.enabled:
             return False
@@ -282,13 +307,17 @@ class SliceViewingToolController:
             if self.rightDown:
                 self.draggingSlice = False
                 self.draggingWl = False
-                self.draggingPan = False
-                self.draggingZoom = True
+                self.draggingZoom = False
+                self.draggingPan = True
                 self.activeInteractor = interactor
                 self.activeSliceLogic = sliceLogic
-                self.zoomStartY = interactor.GetEventPosition()[1]
-                fov = sliceLogic.GetSliceNode().GetFieldOfView()
-                self.zoomStartFov = (float(fov[0]), float(fov[1]), float(fov[2]))
+                pos = interactor.GetEventPosition()
+                self.panStartX, self.panStartY = pos[0], pos[1]
+                sliceNode = sliceLogic.GetSliceNode()
+                origin = sliceNode.GetXYZOrigin()
+                fov = sliceNode.GetFieldOfView()
+                self.panStartOrigin = (float(origin[0]), float(origin[1]), float(origin[2]))
+                self.panStartFov = (float(fov[0]), float(fov[1]), float(fov[2]))
                 return True
             self.draggingSlice = True
             self.activeInteractor = interactor
@@ -318,13 +347,17 @@ class SliceViewingToolController:
                     self.activeSliceLogic.EndSliceOffsetInteraction()
                 self.draggingSlice = False
                 self.draggingWl = False
-                self.draggingPan = False
-                self.draggingZoom = True
+                self.draggingZoom = False
+                self.draggingPan = True
                 self.activeInteractor = interactor
                 self.activeSliceLogic = sliceLogic
-                self.zoomStartY = interactor.GetEventPosition()[1]
-                fov = sliceLogic.GetSliceNode().GetFieldOfView()
-                self.zoomStartFov = (float(fov[0]), float(fov[1]), float(fov[2]))
+                pos = interactor.GetEventPosition()
+                self.panStartX, self.panStartY = pos[0], pos[1]
+                sliceNode = sliceLogic.GetSliceNode()
+                origin = sliceNode.GetXYZOrigin()
+                fov = sliceNode.GetFieldOfView()
+                self.panStartOrigin = (float(origin[0]), float(origin[1]), float(origin[2]))
+                self.panStartFov = (float(fov[0]), float(fov[1]), float(fov[2]))
             else:
                 disp = self._backgroundDisplayNode(sliceLogic)
                 if disp:
@@ -343,6 +376,7 @@ class SliceViewingToolController:
         if event == "RightButtonReleaseEvent":
             self.rightDown = False
             self.draggingZoom = False
+            self.draggingPan = False
             self.draggingWl = False
             if self.draggingSlice and self.activeSliceLogic:
                 self.activeSliceLogic.EndSliceOffsetInteraction()
@@ -356,23 +390,19 @@ class SliceViewingToolController:
             if self.draggingSlice and self.activeSliceLogic:
                 self.activeSliceLogic.EndSliceOffsetInteraction()
             self.draggingSlice = False
-            self.draggingZoom = False
+            self.draggingPan = False
             self.draggingWl = False
-            self.draggingPan = True
+            self.draggingZoom = True
             self.activeInteractor = interactor
             self.activeSliceLogic = sliceLogic
-            pos = interactor.GetEventPosition()
-            self.panStartX, self.panStartY = pos[0], pos[1]
-            sliceNode = sliceLogic.GetSliceNode()
-            origin = sliceNode.GetXYZOrigin()
-            fov = sliceNode.GetFieldOfView()
-            self.panStartOrigin = (float(origin[0]), float(origin[1]), float(origin[2]))
-            self.panStartFov = (float(fov[0]), float(fov[1]), float(fov[2]))
+            self.zoomStartY = interactor.GetEventPosition()[1]
+            fov = sliceLogic.GetSliceNode().GetFieldOfView()
+            self.zoomStartFov = (float(fov[0]), float(fov[1]), float(fov[2]))
             return True
 
         if event == "MiddleButtonReleaseEvent":
             self.middleDown = False
-            self.draggingPan = False
+            self.draggingZoom = False
             self.activeInteractor = None
             self.activeSliceLogic = None
             return True
@@ -392,7 +422,14 @@ class SliceViewingToolController:
             offsetRange = self._offsetRange(sliceLogic)
             if offsetRange:
                 newOffset = min(max(newOffset, offsetRange[0]), offsetRange[1])
-            sliceLogic.SetSliceOffset(newOffset)
+            # Must bracket offset changes with slice-offset interaction so linked views
+            # (slice link / hot link) receive the same broadcast as the native interactor.
+            try:
+                sliceLogic.StartSliceOffsetInteraction()
+                sliceLogic.SetSliceOffset(newOffset)
+                sliceLogic.EndSliceOffsetInteraction()
+            except Exception:
+                sliceLogic.SetSliceOffset(newOffset)
             return True
 
         if event != "MouseMoveEvent":
@@ -442,7 +479,13 @@ class SliceViewingToolController:
             viewHeight = max(1, sliceWidget.sliceView().height)
             scale = math.exp((deltaY / float(viewHeight)) * 1.5)
             fovX, fovY, fovZ = self.zoomStartFov
-            sliceNode.SetFieldOfView(max(1e-3, fovX * scale), max(1e-3, fovY * scale), fovZ)
+            self._setSliceNodeFieldOfViewLinked(
+                self.activeSliceLogic,
+                sliceNode,
+                max(1e-3, fovX * scale),
+                max(1e-3, fovY * scale),
+                fovZ,
+            )
             return True
 
         if self.draggingWl:
@@ -474,7 +517,13 @@ class SliceViewingToolController:
             mmPerPixelX = fovX / float(viewWidth)
             mmPerPixelY = fovY / float(viewHeight)
             startX, startY, startZ = self.panStartOrigin
-            sliceNode.SetXYZOrigin(startX - deltaX * mmPerPixelX, startY - deltaY * mmPerPixelY, startZ)
+            self._setSliceNodeOriginLinked(
+                self.activeSliceLogic,
+                sliceNode,
+                startX - deltaX * mmPerPixelX,
+                startY - deltaY * mmPerPixelY,
+                startZ,
+            )
             return True
 
         if not self.draggingSlice:

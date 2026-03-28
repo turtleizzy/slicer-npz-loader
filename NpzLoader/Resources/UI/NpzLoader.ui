@@ -57,6 +57,33 @@
          </widget>
         </item>
         <item row="4" column="1">
+         <widget class="QCheckBox" name="enableCompareCheckBox">
+          <property name="text"><string>Enable Compare Mode</string></property>
+          <property name="toolTip"><string>Switch paired mode UI to compare one image with two segmentation roots</string></property>
+          <property name="checked"><bool>false</bool></property>
+         </widget>
+        </item>
+        <item row="5" column="0">
+         <widget class="QLabel" name="segDirectoryALabel">
+          <property name="text"><string>SEG A Directory:</string></property>
+         </widget>
+        </item>
+        <item row="5" column="1">
+         <widget class="ctkPathLineEdit" name="segDirectoryASelector">
+          <property name="toolTip"><string>Select segmentation directory A for compare mode</string></property>
+         </widget>
+        </item>
+        <item row="6" column="0">
+         <widget class="QLabel" name="segDirectoryBLabel">
+          <property name="text"><string>SEG B Directory:</string></property>
+         </widget>
+        </item>
+        <item row="6" column="1">
+         <widget class="ctkPathLineEdit" name="segDirectoryBSelector">
+          <property name="toolTip"><string>Select segmentation directory B for compare mode</string></property>
+         </widget>
+        </item>
+        <item row="7" column="1">
          <layout class="QHBoxLayout" name="pairedControlsLayout">
           <item>
            <widget class="QCheckBox" name="onlyWithSegCheckBox">
@@ -122,9 +149,18 @@
       <item>
        <widget class="QTreeWidget" name="loadPlanTree">
         <property name="minimumSize">
-         <size><width>0</width><height>160</height></size>
+         <size><width>0</width><height>0</height></size>
         </property>
-        <property name="toolTip"><string>Configure which data to load and key mappings</string></property>
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Preferred" vsizetype="Expanding">
+          <horstretch>0</horstretch>
+          <verstretch>0</verstretch>
+         </sizepolicy>
+        </property>
+        <property name="selectionMode">
+         <enum>QAbstractItemView::ExtendedSelection</enum>
+        </property>
+        <property name="toolTip"><string>Configure which data to load and key mappings. Ctrl/Shift+click for multi-select; toggling one checkbox applies to all selected rows.</string></property>
        </widget>
       </item>
       <item>
@@ -197,6 +233,13 @@
       <item>
        <widget class="QCheckBox" name="reuseplanCheckBox">
         <property name="text"><string>Reuse last load plan for files with matching keys</string></property>
+        <property name="checked"><bool>true</bool></property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QCheckBox" name="autoShowSeg3DCheckBox">
+        <property name="text"><string>Automatically enable segmentation Show 3D after load</string></property>
+        <property name="toolTip"><string>When checked, loaded segmentations are shown in the 3D view (Segmentations module Show 3D). When unchecked, 3D visibility stays off.</string></property>
         <property name="checked"><bool>true</bool></property>
        </widget>
       </item>

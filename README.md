@@ -77,10 +77,10 @@ If you are developing the module, place this repository where Slicer can load sc
    - NPZ mode: choose root directory and select a data item from the list.
    - Paired mode: choose IMG directory + SEG directory, optionally enable `Only show data with seg`, then click `Scan`.
 4. If using NPZ mode, review detected keys in **NPZ Key Analysis & Load Plan**.
-5. If using NPZ mode, adjust the generated load plan if needed:
-   - enable/disable groups,
-   - remap keys (data / spacing / origin / sparse fields),
-   - add or remove plan groups.
+5. Adjust the **load plan** tree (NPZ or paired):
+   - The tree **grows and shrinks with the module panel** (resize the splitter if needed); scroll when the list is long.
+   - **Multi-select:** Ctrl or Shift + click to select several rows; toggling one **checkbox** applies the same checked/unchecked state to all other selected checkable rows (NPZ: top-level groups; paired: image and segmentation rows).
+   - In **NPZ** mode, also remap keys (data / spacing / origin / sparse fields) and add or remove plan groups as needed.
 6. Click **Load** to import selected data item into the scene.
 7. Click **Close / Clear** to remove nodes loaded by the current file.
 
@@ -98,7 +98,7 @@ If you are developing the module, place this repository where Slicer can load sc
 
 ### Paired Load Plan Preference Persistence
 
-- In paired mode, load plan check states are persisted when switching `data_id` (not only when clicking `Load`).
+- In paired mode, load plan check states are persisted when you **change a checkbox**, when **switching `data_id`**, and when building the selection for load (not only when clicking `Load`).
 - Persisted preferences include:
   - image row enabled/disabled state,
   - segmentation row enabled/disabled state keyed by seg suffix.

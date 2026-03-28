@@ -2,7 +2,7 @@
 
 ## Before you edit
 
-1. **Read** [`.memory/PROJECT_KNOWHOW.md`](.memory/PROJECT_KNOWHOW.md) first. It summarizes architecture, data conventions (NumPy vs Slicer axes, LPS→RAS), module layout, and where logic lives (`NpzLoader.py` vs `SliceViewingTool.py`).
+1. **Read** [`.memory/PROJECT_KNOWHOW.md`](.memory/PROJECT_KNOWHOW.md) first. It summarizes architecture, data conventions (NumPy vs Slicer axes, LPS→RAS), module layout, where logic lives (`NpzLoader.py` vs `SliceViewingTool.py`), and **Qt patterns** for the load-plan tree (splitter/stretch, `blockSignals`, multi-select batch checkboxes).
 2. Treat **[`README.md`](README.md)** as the user-facing feature list and supported key names; align behavior and docs when you change detection or loading rules.
 3. This is a **3D Slicer scripted module**: validate non-trivial UI, geometry, or segmentation changes in **Slicer**, not only by static review.
 

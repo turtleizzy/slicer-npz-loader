@@ -63,6 +63,29 @@ Regex-driven: volume names `img|vol|volume|image` (3D); `spacing` / `origin` by 
 ## UI / shortcuts
 
 - Qt UI from **`NpzLoader.ui`**; load plan edited via tree + combos (`(none)` = unmapped).
+
+### Load plan tree — layout, resize, and multi-select (know-how)
+
+**Problem:** A `QTreeWidget` with a **fixed minimum height** inside a scroll/split layout can **clip** content when the module panel is short. A second issue: users want **batch checkbox** toggles across many rows.
+
+**Layout recipe (this module):**
+
+- Set **`minimumSize` height to 0** on the tree in `.ui` (avoid tall fixed mins).
+- Give the tree **vertical `QSizePolicy.Expanding`** and **`QVBoxLayout.setStretchFactor(tree, 1)`** inside the load-plan collapsible so extra height goes to the tree.
+- In the **lower pane** `QVBoxLayout`, give the **load-plan collapsible stretch `1`** and keep action/settings collapsibles **Maximum** height policy; remove a trailing **addStretch** that steals space from the tree.
+- **QSplitter**: set **non-zero stretch** on both panes if the lower pane should shrink/grow with the window (not only the upper pane).
+- **`_enableResizableWidth`** sets `Ignored` horizontal policy on many widgets so the side panel can narrow; for the load-plan tree, **do not downgrade vertical policy to `Preferred`** — keep **vertical `Expanding`** so the tree still fills available height.
+
+**Multi-select + batch check:**
+
+- `QTreeWidget.setSelectionMode(QAbstractItemView.ExtendedSelection)`.
+- Connect **`itemChanged(QTreeWidgetItem*, int)`**; only handle **column 0** and items with **`ItemIsUserCheckable`**.
+- If **`len(selectedItems()) > 1`** and the **edited item is in the selection**, set **`checkState(0)`** on all other selected checkable items to match the edited item; wrap updates in **`tree.blockSignals(True/False)`** to avoid recursive `itemChanged`.
+- Persist state: **paired** → `_persistCurrentLoadPlanPreference()` (reads tree into QSettings-backed dicts); **NPZ** → `_readLoadPlanFromTree()` when `_loadPlanGroups` is non-empty.
+- During **`tree.clear()` / `setCheckState` in populate**, wrap the whole populate in **`blockSignals(True/False)`** so programmatic fills do not trigger saves or batch logic.
+
+**Files:** `NpzLoader.ui` (min size, policy, selection mode), `NpzLoader.py` (`setup`, `_setupScrollableAndResizableLayout`, `_enableResizableWidth`, `_onLoadPlanTreeItemChanged`, `_populateLoadPlanTree`, `_populatePairedLoadPlanTree`).
+
 - **Shortcuts** (only when module **NpzLoader** is selected, for WL/seg): `F1`–`F3` window/level from settings; `T` / `Shift+T` seg fill/contour/hide; `S` toggles slice tool.
 - **`SliceViewingTool`**: global singleton via **`ensureGlobalSliceViewingTool`** (created at main window or `startupCompleted`); adds toolbar action on mouse mode bar; custom interactor observers for slice drag, WL, pan, zoom; `status_callback` can drive module status label. **`onDataLoaded`** refreshes observers and can auto-enable the tool.
 - Qt/PythonQt dialog pitfall: **`QDialogButtonBox` may render empty/invisible in some builds**. Prefer explicit `QPushButton` ("OK"/"Cancel") laid out with `QHBoxLayout` + `addStretch` and connect `clicked()` to `dialog.accept()/reject()`.
@@ -96,6 +119,12 @@ When you need to test behavior or inspect Slicer APIs (python modules/classes, M
 
 ## 2026-03 data review expansion notes
 
+### 2026-03 load plan tree UI (resize + multi-select)
+
+**Summary of change:** Load plan `QTreeWidget` no longer uses a tall fixed minimum height; layout/splitter/stretch policies were adjusted so the tree **fills available vertical space** and scrolls when the module panel is small. **ExtendedSelection** + `itemChanged` handler enables **batch checkbox** toggling for selected rows; paired preferences persist on checkbox edit; NPZ `_loadPlanGroups` syncs from the tree on checkbox edit. Population paths use `blockSignals` around rebuilds.
+
+**Doc updates:** `README.md` (usage + paired persistence bullets); this file (subsection **Load plan tree — layout, resize, and multi-select**).
+
 ### Data source architecture
 
 - The module now supports two review sources in one workflow:
@@ -122,6 +151,7 @@ When you need to test behavior or inspect Slicer APIs (python modules/classes, M
 
 ### Paired load plan behavior
 
+- Checkbox edits now call the same persistence path as switching items (via `itemChanged` → `_persistCurrentLoadPlanPreference`); switching `data_id` still persists the previous item first.
 - Paired mode reuses the existing load-plan tree area but with a paired-specific plan:
   - one checkable `image` row (may be unchecked when `img_path` missing),
   - multiple checkable `seg` rows.
