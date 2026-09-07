@@ -11,7 +11,7 @@ import numpy as np
 import numpy.lib.format as npyfmt
 import qt
 import slicer
-from SliceViewingTool import ensureGlobalSliceViewingTool, getGlobalSliceViewingTool
+from NpzLoaderLib.SliceViewingTool import ensureGlobalSliceViewingTool, getGlobalSliceViewingTool
 from slicer.ScriptedLoadableModule import (
     ScriptedLoadableModule,
     ScriptedLoadableModuleLogic,
@@ -49,7 +49,7 @@ class KeyInfo:
     name: str
     shape: tuple
     dtype: str
-    role: str  # "volume", "spacing", "origin", "seg_labelmap", "seg_sparse_ind", "seg_sparse_color", "unknown"
+    role: str  # "volume", "spacing", "origin", "direction", "seg_labelmap", "seg_sparse_ind", "seg_sparse_color", "unknown"
 
 
 @dataclass
@@ -166,7 +166,9 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         self.ui.reuseplanCheckBox.checked = True
         self._loadFloatSegSettings()
         self._loadSeg3DSettings()
+        self._loadDirectionHandednessSettings()
         self.ui.autoShowSeg3DCheckBox.connect("toggled(bool)", self._onAutoShowSeg3DToggled)
+        self.ui.directionIsLpsCheckBox.connect("toggled(bool)", self._onDirectionIsLpsToggled)
         self.ui.floatSegAutoThresholdCheckBox.connect(
             "toggled(bool)", self._onFloatSegAutoThresholdToggled
         )
@@ -446,8 +448,28 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
     def _onFloatSegThresholdChanged(self, _value: float):
         self._saveFloatSegSettings()
 
+    def _loadDirectionHandednessSettings(self):
+        settings = qt.QSettings()
+        self.ui.directionIsLpsCheckBox.checked = self._toBool(
+            settings.value("NpzLoader/DirectionIsLPS", True)
+        )
+        if self.logic:
+            self.logic.directionIsLPS = bool(self.ui.directionIsLpsCheckBox.checked)
+
+    def _saveDirectionHandednessSettings(self):
+        settings = qt.QSettings()
+        settings.setValue(
+            "NpzLoader/DirectionIsLPS",
+            bool(self.ui.directionIsLpsCheckBox.checked),
+        )
+        if self.logic:
+            self.logic.directionIsLPS = bool(self.ui.directionIsLpsCheckBox.checked)
+
     def _onAutoShowSeg3DToggled(self, _checked: bool):
         self._saveSeg3DSettings()
+
+    def _onDirectionIsLpsToggled(self, _checked: bool):
+        self._saveDirectionHandednessSettings()
 
     def _setupShortcuts(self):
         mainWindow = slicer.util.mainWindow()
@@ -1128,12 +1150,13 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
         volumeShape = None
         volumeSpacing = None
         volumeOrigin = None
+        volumeDirection = None
 
-        # First pass: load volumes to determine shape/spacing/origin for segs
+        # First pass: load volumes to determine shape and Slicer xyz geometry for segs
         for group in enabledGroups:
             if group.group_type == "volume":
                 try:
-                    nodeIds, vShape, vSpacing, vOrigin = self.logic.loadVolume(
+                    nodeIds, vShape, vSpacing, vOrigin, vDirection = self.logic.loadVolume(
                         npzData, group, baseName
                     )
                     self._loadedNodeIds.extend(nodeIds)
@@ -1142,6 +1165,7 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
                         volumeShape = vShape
                         volumeSpacing = vSpacing
                         volumeOrigin = vOrigin
+                        volumeDirection = vDirection
                 except Exception as e:
                     slicer.util.errorDisplay(f"Error loading volume '{group.name}':\n{e}")
 
@@ -1150,7 +1174,7 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
             if group.group_type == "seg_labelmap":
                 try:
                     nodeIds = self.logic.loadSegLabelmap(
-                        npzData, group, baseName, volumeShape, volumeSpacing, volumeOrigin
+                        npzData, group, baseName, volumeShape, volumeSpacing, volumeOrigin, volumeDirection
                     )
                     self._loadedNodeIds.extend(nodeIds)
                     self._loadedSegmentationNodeIds.extend(nodeIds)
@@ -1159,7 +1183,7 @@ class NpzLoaderWidget(ScriptedLoadableModuleWidget):
             elif group.group_type == "seg_sparse":
                 try:
                     nodeIds = self.logic.loadSegSparse(
-                        npzData, group, baseName, volumeShape, volumeSpacing, volumeOrigin
+                        npzData, group, baseName, volumeShape, volumeSpacing, volumeOrigin, volumeDirection
                     )
                     self._loadedNodeIds.extend(nodeIds)
                     self._loadedSegmentationNodeIds.extend(nodeIds)
@@ -1569,6 +1593,9 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
         self._supportedImageExtensions = (".nii", ".nii.gz", ".nrrd", ".mhd")
         # Match Segmentation module "Show 3D" after load (see PROJECT_KNOWHOW.md).
         self.autoShowSeg3D: bool = True
+        # Provided IJK direction matrices are LPS (ITK/DICOM) by default.
+        # When True, convert to Slicer RAS by negating L and P axes.
+        self.directionIsLPS: bool = True
 
     # ---- Key analysis ------------------------------------------------------
 
@@ -1576,11 +1603,14 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
     # Accept both prefix/suffix forms:
     # - origin* or *origin
     # - spacing* or *spacing
+    # - direction* or *direction (shape (3,3) or (9,))
     _SPACING_PATTERN = re.compile(r"(^spacing|spacing$)", re.IGNORECASE)
     _ORIGIN_PATTERN = re.compile(r"(^origin|origin$)", re.IGNORECASE)
+    _DIRECTION_PATTERN = re.compile(r"(^direction|direction$)", re.IGNORECASE)
     _SEG_PATTERN = re.compile(r"(^seg|seg$)", re.IGNORECASE)
     _SPARSE_IND_PATTERN = re.compile(r"(?:^|_)(inds?)$", re.IGNORECASE)
     _SPARSE_COLOR_PATTERN = re.compile(r"color_point|color_points|colorpoint|colorpoints", re.IGNORECASE)
+    _LABELMAP_PATTERN = re.compile(r"^label", re.IGNORECASE)
 
     @staticmethod
     def _readNpyHeaderShapeDtype(fileobj) -> tuple[tuple, str]:
@@ -1621,6 +1651,8 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
             return "spacing"
         if self._ORIGIN_PATTERN.match(name):
             return "origin"
+        if self._DIRECTION_PATTERN.search(name) and self._isDirectionShape(shape):
+            return "direction"
         if self._VOLUME_PATTERN.match(name) and len(shape) == 3:
             return "volume"
         if self._SPARSE_IND_PATTERN.search(name) and len(shape) == 2 and shape[1] == 3:
@@ -1630,9 +1662,18 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
         # Dense seg: name matches seg; allow non-integer dtypes (e.g. float masks) — load casts to int16.
         if self._SEG_PATTERN.search(name) and len(shape) == 3:
             return "seg_labelmap"
+        if self._LABELMAP_PATTERN.match(name) and len(shape) == 3:
+            return "seg_labelmap"
         if len(shape) == 3 and self._VOLUME_PATTERN.match(name) is None and self._SEG_PATTERN.search(name) is None:
             return "unknown"
         return "unknown"
+
+    @staticmethod
+    def _isDirectionShape(shape: tuple) -> bool:
+        squeezed = tuple(int(s) for s in shape if int(s) != 1)
+        if squeezed == (3, 3):
+            return True
+        return squeezed == (9,)
 
     # ---- Plan generation ---------------------------------------------------
 
@@ -1641,6 +1682,7 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
 
         spacingKey = next((k.name for k in keys if k.role == "spacing"), None)
         originKey = next((k.name for k in keys if k.role == "origin"), None)
+        directionKey = next((k.name for k in keys if k.role == "direction"), None)
 
         # Volumes
         for k in keys:
@@ -1649,7 +1691,12 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
                     name=k.name,
                     group_type="volume",
                     enabled=True,
-                    mappings={"data": k.name, "spacing": spacingKey, "origin": originKey},
+                    mappings={
+                        "data": k.name,
+                        "spacing": spacingKey,
+                        "origin": originKey,
+                        "direction": directionKey,
+                    },
                 ))
 
         # Labelmap segmentations
@@ -1659,7 +1706,12 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
                     name=k.name,
                     group_type="seg_labelmap",
                     enabled=True,
-                    mappings={"data": k.name, "spacing": spacingKey, "origin": originKey},
+                    mappings={
+                        "data": k.name,
+                        "spacing": spacingKey,
+                        "origin": originKey,
+                        "direction": directionKey,
+                    },
                 ))
 
         # Sparse segmentations: pair ind with color_point
@@ -1696,7 +1748,12 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
                         name=k.name,
                         group_type="volume",
                         enabled=True,
-                        mappings={"data": k.name, "spacing": spacingKey, "origin": originKey},
+                        mappings={
+                            "data": k.name,
+                            "spacing": spacingKey,
+                            "origin": originKey,
+                            "direction": directionKey,
+                        },
                     ))
                     break
 
@@ -1706,21 +1763,24 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
         return ",".join(sorted(k.name for k in keys))
 
     def clonePlanGroups(self, groups: list[LoadPlanGroup]) -> list[LoadPlanGroup]:
-        return [
-            LoadPlanGroup(
+        cloned = []
+        for g in groups:
+            mappings = dict(g.mappings)
+            if g.group_type in ("volume", "seg_labelmap") and "direction" not in mappings:
+                mappings["direction"] = None
+            cloned.append(LoadPlanGroup(
                 name=g.name,
                 group_type=g.group_type,
                 enabled=g.enabled,
-                mappings=dict(g.mappings),
-            )
-            for g in groups
-        ]
+                mappings=mappings,
+            ))
+        return cloned
 
     def defaultMappingsForType(self, groupType: str) -> dict:
         if groupType == "volume":
-            return {"data": None, "spacing": None, "origin": None}
+            return {"data": None, "spacing": None, "origin": None, "direction": None}
         elif groupType == "seg_labelmap":
-            return {"data": None, "spacing": None, "origin": None}
+            return {"data": None, "spacing": None, "origin": None, "direction": None}
         elif groupType == "seg_sparse":
             return {"ind": None, "color_point": None, "spacing": None, "origin": None}
         return {}
@@ -2003,64 +2063,146 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
             return arr.astype(np.float64)
         return arr
 
-    # LPS → RAS: Slicer uses RAS (Right, Anterior, Superior).  DICOM / many
-    # numpy pipelines use LPS (Left, Posterior, Superior) with voxel indices
-    # increasing along +L, +P, +S.  Map I,J,K to RAS directions by negating
-    # the in-plane axes (L→R, P→A); keep +S along K (typical axial stack).
-    # Rows are I, J, K axis directions in RAS (same order as SetIJKToRASDirections).
-    _IJK_DIRECTIONS_LPS_TO_RAS = [
-        [-1, 0, 0],
-        [0, -1, 0],
-        [0, 0, 1],
+    # Direction matrices follow SimpleITK/ITK GetDirection(): columns are
+    # I, J, K axis directions in the source physical frame. Missing direction
+    # defaults to identity (numpy eye(3)). When directionIsLPS is True (default),
+    # convert LPS→RAS with diag(-1,-1,1) and pass ITK layout through to Slicer:
+    # Slicer = diag(-1,-1,1) @ D_itk
+    _IJK_DIRECTIONS_IDENTITY = [
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ]
+    _LPS_TO_RAS_HANDEDNESS = [
+        [-1.0, 0.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, 1.0],
     ]
 
     @staticmethod
-    def _resolveSpacingOrigin(npzData, mappings, volumeSpacing=None, volumeOrigin=None):
-        """Return (spacing_xyz, origin_xyz) tuples in Slicer (x,y,z) order."""
+    def _parseDirectionArray(arr) -> np.ndarray:
+        """Normalize a direction array to a (3, 3) float matrix."""
+        d = np.squeeze(np.asarray(arr, dtype=np.float64))
+        if d.size == 9:
+            d = d.reshape(3, 3)
+        if d.shape != (3, 3):
+            raise ValueError(f"Direction array must be shape (3, 3) or (9,), got {np.asarray(arr).shape}")
+        return d
+
+    @classmethod
+    def _identityDirections(cls) -> np.ndarray:
+        return np.array(cls._IJK_DIRECTIONS_IDENTITY, dtype=np.float64)
+
+    def _directionsToSlicer(self, directions=None) -> np.ndarray:
+        """Convert an ITK IJK direction matrix into Slicer RAS.
+
+        Input layout matches SimpleITK/ITK ``GetDirection()``: columns are the
+        I, J, K axis directions in the source physical frame. The 3x3 is passed
+        to ``SetIJKToRASDirections`` in the same ITK row-major layout. LPS
+        frames are mapped to RAS with ``diag(-1, -1, 1)`` when
+        ``directionIsLPS`` is True: ``Slicer = LPS2RAS @ D_itk``.
+        """
+        d = self._identityDirections() if directions is None else self._parseDirectionArray(directions)
+        if self.directionIsLPS:
+            physical_to_ras = np.array(self._LPS_TO_RAS_HANDEDNESS, dtype=np.float64)
+            return physical_to_ras @ d
+        return np.array(d, dtype=np.float64, copy=True)
+
+    @staticmethod
+    def _npzConvention(npzData) -> Optional[str]:
+        if npzData is None or "convention" not in npzData:
+            return None
+        return str(np.asarray(npzData["convention"])).strip().lower()
+
+    @classmethod
+    def _axisOrderForKey(cls, keyName: Optional[str], npzData=None) -> str:
+        """Return 'xyz' or 'zyx' for a spacing/origin vector key."""
+        name = (keyName or "").lower()
+        if "zyx" in name:
+            return "zyx"
+        if any(tag in name for tag in ("xyz", "lps", "ras")):
+            return "xyz"
+        conv = cls._npzConvention(npzData)
+        if conv in ("lps", "ras", "xyz"):
+            return "xyz"
+        if conv == "zyx":
+            return "zyx"
+        return "zyx"
+
+    @classmethod
+    def _tuple3(cls, values) -> tuple:
+        seq = [float(v) for v in np.asarray(values).ravel()[:3]]
+        if len(seq) != 3:
+            raise ValueError(f"Expected a length-3 vector, got {np.asarray(values).shape}")
+        return tuple(seq)
+
+    @classmethod
+    def _toSlicerXyz(cls, values, keyName: Optional[str], npzData=None) -> tuple:
+        vec = cls._tuple3(values)
+        if cls._axisOrderForKey(keyName, npzData) == "xyz":
+            return vec
+        return (vec[2], vec[1], vec[0])
+
+    @classmethod
+    def _originToSlicer(cls, values, keyName: Optional[str], npzData=None) -> tuple:
+        xyz = cls._toSlicerXyz(values, keyName, npzData)
+        name = (keyName or "").lower()
+        is_lps = "lps" in name
+        is_ras = ("ras" in name) and ("lps" not in name)
+        if not is_lps and not is_ras:
+            conv = cls._npzConvention(npzData)
+            is_lps = conv == "lps"
+            is_ras = conv == "ras"
+        if is_lps:
+            return (-xyz[0], -xyz[1], xyz[2])
+        return xyz
+
+    @classmethod
+    def _resolveSpacingOrigin(cls, npzData, mappings, volumeSpacing=None, volumeOrigin=None):
+        """Return (spacing_xyz, origin_xyz) tuples in Slicer (x,y,z) RAS."""
         spacingKey = mappings.get("spacing")
         originKey = mappings.get("origin")
 
         if spacingKey and spacingKey in npzData:
-            sp = tuple(float(v) for v in npzData[spacingKey])  # (z, y, x)
+            spacing_xyz = cls._toSlicerXyz(npzData[spacingKey], spacingKey, npzData)
         elif volumeSpacing is not None:
-            sp = volumeSpacing  # already (z, y, x)
+            spacing_xyz = cls._tuple3(volumeSpacing)
         else:
-            sp = (1.0, 1.0, 1.0)
+            spacing_xyz = (1.0, 1.0, 1.0)
 
         if originKey and originKey in npzData:
-            og = tuple(float(v) for v in npzData[originKey])  # (z, y, x)
+            origin_xyz = cls._originToSlicer(npzData[originKey], originKey, npzData)
         elif volumeOrigin is not None:
-            og = volumeOrigin  # already (z, y, x)
+            origin_xyz = cls._tuple3(volumeOrigin)
         else:
-            og = (0.0, 0.0, 0.0)
+            origin_xyz = (0.0, 0.0, 0.0)
 
-        # Reverse from (z, y, x) to (x, y, z) for Slicer
-        spacing_xyz = (sp[2], sp[1], sp[0])
-        origin_xyz = (og[2], og[1], og[0])
         return spacing_xyz, origin_xyz
 
-    @classmethod
-    def _applyGeometry(cls, node, spacing_xyz, origin_xyz, shape):
-        """Set spacing, LPS→RAS directions, and origin on a volume node.
+    def _resolveDirection(self, npzData, mappings, volumeDirection=None) -> np.ndarray:
+        """Return a (3, 3) source-frame IJK direction matrix; default is identity."""
+        directionKey = mappings.get("direction")
+        if directionKey and directionKey in npzData:
+            return self._parseDirectionArray(npzData[directionKey])
+        if volumeDirection is not None:
+            return self._parseDirectionArray(volumeDirection)
+        return self._identityDirections()
 
-        Numpy array is (K, J, I) = (D, H, W).  For each axis whose RAS direction
-        is negated vs identity, shift origin so the same voxel grid maps to the
-        same physical extent (corner of index space stays consistent).
+    def _applyGeometry(self, node, spacing_xyz, origin_xyz, shape, directions=None):
+        """Set spacing, IJK→RAS directions, and origin on a volume node.
+
+        `directions` is an ITK 3x3 matrix (columns are I, J, K axes) in the
+        source physical frame. When omitted, identity (eye(3)) is used. LPS
+        frames are converted to Slicer RAS when `directionIsLPS` is True
+        (`Slicer = diag(-1,-1,1) @ D`).
         """
         node.SetSpacing(*spacing_xyz)
-        # I and J negated → compensate X and Y; K unchanged → no Z shift.
-        # shape[2]=I extent, shape[1]=J extent, shape[0]=K extent.
-        adjusted_origin = (
-            origin_xyz[0], # + (shape[2] - 1) * spacing_xyz[0
-            origin_xyz[1], # + (shape[1] - 1) * spacing_xyz[1],
-            origin_xyz[2],
-        )
-        node.SetOrigin(*adjusted_origin)
-        d = cls._IJK_DIRECTIONS_LPS_TO_RAS
+        node.SetOrigin(*origin_xyz)
+        d = self._directionsToSlicer(directions)
         node.SetIJKToRASDirections(
-            d[0][0], d[0][1], d[0][2],
-            d[1][0], d[1][1], d[1][2],
-            d[2][0], d[2][1], d[2][2],
+            float(d[0, 0]), float(d[0, 1]), float(d[0, 2]),
+            float(d[1, 0]), float(d[1, 1]), float(d[1, 2]),
+            float(d[2, 0]), float(d[2, 1]), float(d[2, 2]),
         )
 
     # ---- Volume loading ----------------------------------------------------
@@ -2075,22 +2217,18 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
             raise ValueError(f"Volume array '{dataKey}' must be 3-D, got shape {data.shape}")
 
         spacing_xyz, origin_xyz = self._resolveSpacingOrigin(npzData, group.mappings)
+        directions = self._resolveDirection(npzData, group.mappings)
 
         nodeName = f"{baseName}_{group.name}"
         volumeNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", nodeName)
-        self._applyGeometry(volumeNode, spacing_xyz, origin_xyz, data.shape)
+        self._applyGeometry(volumeNode, spacing_xyz, origin_xyz, data.shape, directions)
         slicer.util.updateVolumeFromArray(volumeNode, data)
         volumeNode.CreateDefaultDisplayNodes()
 
         slicer.util.setSliceViewerLayers(background=volumeNode, fit=True)
 
-        # Retrieve raw spacing/origin in (z,y,x) for downstream seg use
-        spKey = group.mappings.get("spacing")
-        rawSpacing = tuple(float(v) for v in npzData[spKey]) if (spKey and spKey in npzData) else (1.0, 1.0, 1.0)
-        ogKey = group.mappings.get("origin")
-        rawOrigin = tuple(float(v) for v in npzData[ogKey]) if (ogKey and ogKey in npzData) else (0.0, 0.0, 0.0)
-
-        return [volumeNode.GetID()], data.shape, rawSpacing, rawOrigin
+        # First volume's Slicer xyz spacing/origin (RAS) for downstream segs
+        return [volumeNode.GetID()], data.shape, spacing_xyz, origin_xyz, directions
 
     def _convertFloatSegToLabelmap(self, segData: np.ndarray, threshold: float) -> tuple[np.ndarray, str]:
         """
@@ -2149,7 +2287,7 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
     # ---- Seg-labelmap loading ----------------------------------------------
 
     def loadSegLabelmap(self, npzData, group: LoadPlanGroup, baseName: str,
-                        volumeShape=None, volumeSpacing=None, volumeOrigin=None):
+                        volumeShape=None, volumeSpacing=None, volumeOrigin=None, volumeDirection=None):
         dataKey = group.mappings.get("data")
         if not dataKey:
             raise ValueError("No data key specified for seg_labelmap group.")
@@ -2162,10 +2300,12 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
         hasOwnGeometry = (volumeShape is None or segDataRaw.shape != volumeShape)
         if hasOwnGeometry:
             spacing_xyz, origin_xyz = self._resolveSpacingOrigin(npzData, group.mappings)
+            directions = self._resolveDirection(npzData, group.mappings)
         else:
             spacing_xyz, origin_xyz = self._resolveSpacingOrigin(
                 npzData, group.mappings, volumeSpacing, volumeOrigin
             )
+            directions = self._resolveDirection(npzData, group.mappings, volumeDirection)
 
         if np.issubdtype(segDataRaw.dtype, np.floating) and self.floatSegAutoThreshold:
             segData, mode = self._convertFloatSegToLabelmap(segDataRaw, threshold=self.floatSegThreshold)
@@ -2186,7 +2326,7 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
 
         labelmapName = f"{baseName}_{group.name}_labelmap"
         labelmapNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", labelmapName)
-        self._applyGeometry(labelmapNode, spacing_xyz, origin_xyz, segData.shape)
+        self._applyGeometry(labelmapNode, spacing_xyz, origin_xyz, segData.shape, directions)
         slicer.util.updateVolumeFromArray(labelmapNode, segData)
 
         segNodeName = f"{baseName}_{group.name}"
@@ -2204,7 +2344,7 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
     # ---- Seg-sparse loading ------------------------------------------------
 
     def loadSegSparse(self, npzData, group: LoadPlanGroup, baseName: str,
-                      volumeShape=None, volumeSpacing=None, volumeOrigin=None):
+                      volumeShape=None, volumeSpacing=None, volumeOrigin=None, volumeDirection=None):
         indKey = group.mappings.get("ind")
         if not indKey:
             raise ValueError("No ind key specified for seg_sparse group.")
@@ -2232,10 +2372,11 @@ class NpzLoaderLogic(ScriptedLoadableModuleLogic):
         spacing_xyz, origin_xyz = self._resolveSpacingOrigin(
             npzData, group.mappings, volumeSpacing, volumeOrigin
         )
+        directions = self._resolveDirection(npzData, group.mappings, volumeDirection)
 
         labelmapName = f"{baseName}_{group.name}_sparse_labelmap"
         labelmapNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", labelmapName)
-        self._applyGeometry(labelmapNode, spacing_xyz, origin_xyz, labelmap.shape)
+        self._applyGeometry(labelmapNode, spacing_xyz, origin_xyz, labelmap.shape, directions)
         slicer.util.updateVolumeFromArray(labelmapNode, labelmap)
 
         segNodeName = f"{baseName}_{group.name}"
@@ -2277,9 +2418,18 @@ class NpzLoaderTest(ScriptedLoadableModuleTest):
         seg_float = np.zeros((10, 20, 30), dtype=np.float32)
         spacing = np.array([0.5, 0.5, 0.5])
         origin = np.array([10.0, 20.0, 30.0])
+        direction = np.eye(3, dtype=np.float64)
 
         tmpFile = os.path.join(tempfile.gettempdir(), "test_npz_loader.npz")
-        np.savez(tmpFile, img=vol, seg_organ=seg, seg=seg_float, spacing=spacing, origin=origin)
+        np.savez(
+            tmpFile,
+            img=vol,
+            seg_organ=seg,
+            seg=seg_float,
+            spacing=spacing,
+            origin=origin,
+            direction=direction,
+        )
 
         logic = NpzLoaderLogic()
         keys = logic.analyzeNpzKeys(tmpFile)
@@ -2289,10 +2439,14 @@ class NpzLoaderTest(ScriptedLoadableModuleTest):
         assert roles["seg"] == "seg_labelmap", f"Expected seg_labelmap for float seg key, got {roles['seg']}"
         assert roles["spacing"] == "spacing"
         assert roles["origin"] == "origin"
+        assert roles["direction"] == "direction"
 
         plan = logic.generateLoadPlan(keys)
         assert any(g.group_type == "volume" for g in plan)
         assert any(g.group_type == "seg_labelmap" for g in plan)
+        for g in plan:
+            if g.group_type in ("volume", "seg_labelmap"):
+                assert g.mappings.get("direction") == "direction", g
 
         os.remove(tmpFile)
         self.delayDisplay("Key analysis test passed!")
@@ -2314,7 +2468,8 @@ class NpzLoaderTest(ScriptedLoadableModuleTest):
 
         npzData = np.load(tmpFile, allow_pickle=False)
         volGroup = [g for g in plan if g.group_type == "volume"][0]
-        nodeIds, shape, sp, og = logic.loadVolume(npzData, volGroup, "test")
+        assert volGroup.mappings.get("direction") is None
+        nodeIds, shape, sp, og, directions = logic.loadVolume(npzData, volGroup, "test")
         npzData.close()
 
         assert len(nodeIds) == 1
@@ -2327,8 +2482,94 @@ class NpzLoaderTest(ScriptedLoadableModuleTest):
         assert abs(nodeSp[1] - 1.0) < 1e-6
         assert abs(nodeSp[2] - 2.0) < 1e-6
 
+        np.testing.assert_allclose(directions, np.eye(3), atol=1e-6)
+        expectedLps = logic._directionsToSlicer(np.eye(3))
+        np.testing.assert_allclose(expectedLps, np.diag([-1.0, -1.0, 1.0]), atol=1e-6)
+        nodeDirs = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+        node.GetIJKToRASDirections(nodeDirs)
+        np.testing.assert_allclose(np.array(nodeDirs), expectedLps, atol=1e-6)
+
         slicer.mrmlScene.RemoveNode(node)
         os.remove(tmpFile)
+
+        # RAS mode: identity direction is applied without LPS conversion.
+        logic.directionIsLPS = False
+        tmpFileRas = os.path.join(tempfile.gettempdir(), "test_npz_loader_vol_ras.npz")
+        np.savez(tmpFileRas, img=vol, spacing=spacing, origin=origin)
+        npzRas = np.load(tmpFileRas, allow_pickle=False)
+        nodeIdsRas, _, _, _, dirsRas = logic.loadVolume(npzRas, volGroup, "test_ras")
+        npzRas.close()
+        nodeRas = slicer.mrmlScene.GetNodeByID(nodeIdsRas[0])
+        nodeDirsRas = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+        nodeRas.GetIJKToRASDirections(nodeDirsRas)
+        np.testing.assert_allclose(np.array(nodeDirsRas), np.eye(3), atol=1e-6)
+        slicer.mrmlScene.RemoveNode(nodeRas)
+        os.remove(tmpFileRas)
+
+        # Custom LPS direction is converted to RAS when the switch is on.
+        logic.directionIsLPS = True
+        customDir = np.array([[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+        tmpFileDir = os.path.join(tempfile.gettempdir(), "test_npz_loader_vol_dir.npz")
+        np.savez(tmpFileDir, img=vol, spacing=spacing, origin=origin, direction=customDir)
+        keysDir = logic.analyzeNpzKeys(tmpFileDir)
+        planDir = logic.generateLoadPlan(keysDir)
+        volGroupDir = [g for g in planDir if g.group_type == "volume"][0]
+        assert volGroupDir.mappings.get("direction") == "direction"
+        npzDataDir = np.load(tmpFileDir, allow_pickle=False)
+        nodeIdsDir, _, _, _, appliedDir = logic.loadVolume(npzDataDir, volGroupDir, "test_dir")
+        npzDataDir.close()
+        nodeDir = slicer.mrmlScene.GetNodeByID(nodeIdsDir[0])
+        np.testing.assert_allclose(appliedDir, customDir, atol=1e-6)
+        expectedCustom = logic._directionsToSlicer(customDir)
+        nodeDirsCustom = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+        nodeDir.GetIJKToRASDirections(nodeDirsCustom)
+        np.testing.assert_allclose(np.array(nodeDirsCustom), expectedCustom, atol=1e-6)
+        slicer.mrmlScene.RemoveNode(nodeDir)
+        os.remove(tmpFileDir)
+
+        # ITK-style xyz / LPS keys (spacing_xyz, origin_lps, direction_3x3).
+        logic.directionIsLPS = True
+        itkDir = np.array(
+            [[-0.5056552, -0.81364193, -0.28687911],
+             [0.00648322, -0.33609684, 0.94180512],
+             [-0.8627113, 0.47436876, 0.17522414]],
+            dtype=np.float64,
+        )
+        originLps = np.array([68.44601351, 25.60537905, -50.94562633], dtype=np.float64)
+        spacingXyz = np.array([0.5, 0.5, 0.5], dtype=np.float64)
+        tmpItk = os.path.join(tempfile.gettempdir(), "test_npz_loader_itk_lps.npz")
+        np.savez(
+            tmpItk,
+            img=vol,
+            spacing_xyz=spacingXyz,
+            origin_lps=originLps,
+            direction_3x3=itkDir,
+        )
+        keysItk = logic.analyzeNpzKeys(tmpItk)
+        rolesItk = {k.name: k.role for k in keysItk}
+        assert rolesItk["spacing_xyz"] == "spacing"
+        assert rolesItk["origin_lps"] == "origin"
+        assert rolesItk["direction_3x3"] == "direction"
+        planItk = logic.generateLoadPlan(keysItk)
+        volItk = [g for g in planItk if g.group_type == "volume"][0]
+        npzItk = np.load(tmpItk, allow_pickle=False)
+        nodeIdsItk, _, spItk, ogItk, rawItk = logic.loadVolume(npzItk, volItk, "test_itk")
+        npzItk.close()
+        np.testing.assert_allclose(spItk, (0.5, 0.5, 0.5), atol=1e-6)
+        np.testing.assert_allclose(ogItk, (-originLps[0], -originLps[1], originLps[2]), atol=1e-6)
+        np.testing.assert_allclose(rawItk, itkDir, atol=1e-6)
+        nodeItk = slicer.mrmlScene.GetNodeByID(nodeIdsItk[0])
+        nodeOg = nodeItk.GetOrigin()
+        assert abs(nodeOg[0] + originLps[0]) < 1e-6
+        assert abs(nodeOg[1] + originLps[1]) < 1e-6
+        assert abs(nodeOg[2] - originLps[2]) < 1e-6
+        expectedItkDirs = logic._directionsToSlicer(itkDir)
+        nodeItkDirs = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+        nodeItk.GetIJKToRASDirections(nodeItkDirs)
+        np.testing.assert_allclose(np.array(nodeItkDirs), expectedItkDirs, atol=1e-6)
+        slicer.mrmlScene.RemoveNode(nodeItk)
+        os.remove(tmpItk)
+
         self.delayDisplay("Volume loading test passed!")
 
     def test_ScanPairedDirectory(self):

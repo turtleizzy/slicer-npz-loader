@@ -15,7 +15,7 @@ It supports both NumPy archives (`.npz` / `.npy`) and paired image/segmentation 
   - sparse index format (`*_ind` / `*_inds` with optional `*_color_point(s)`).
 - Auto-analyzes file keys and generates an editable load plan.
 - Supports reusable load plans for files with matching key signatures.
-- Applies geometry using spacing/origin metadata when available.
+- Applies geometry using spacing/origin/direction metadata when available.
 - Includes a custom Slice Viewing Tool and useful keyboard shortcuts.
 
 ## Supported Data Conventions
@@ -30,15 +30,19 @@ It supports both NumPy archives (`.npz` / `.npy`) and paired image/segmentation 
 - Volume: `img`, `vol`, `volume`, `image` (3D arrays).
 - Spacing: keys that start or end with `spacing`.
 - Origin: keys that start or end with `origin`.
-- Dense segmentation: keys that start or end with `seg` and are integer 3D arrays.
+- Direction: keys that start or end with `direction` and are shape `(3, 3)` or `(9,)`.
+- Dense segmentation: keys that start or end with `seg`, or start with `label`, and are 3D arrays.
 - Sparse segmentation indices: keys ending with `ind` / `inds` with shape `(N, 3)`.
 - Sparse segmentation labels: keys containing `color_point`, `color_points`, `colorpoint`, or `colorpoints`.
 
 ### Axis and geometry assumptions
 
 - Arrays are interpreted in NumPy order `(z, y, x)` for voxel data.
-- `spacing` and `origin` values are expected in `(z, y, x)` and converted internally to Slicer axis order.
-- Default spacing/origin are `(1, 1, 1)` and `(0, 0, 0)` if metadata is missing.
+- Unsuffixed `spacing` / `origin` values are treated as `(z, y, x)` and converted to Slicer `(x, y, z)`.
+- Keys such as `spacing_xyz`, `origin_lps`, and `origin_ras` are already `(x, y, z)`. An LPS origin is converted to RAS as `(-L, -P, S)`.
+- `direction` is an ITK 3×3 matrix (columns are I, J, K axes), matching SimpleITK `GetDirection()`. It is **not** zyx-reversed.
+- By default the matrix is treated as **LPS** and converted to Slicer **RAS** as `diag(-1,-1,1) @ D`. Uncheck **Treat direction matrix as LPS** in Settings if the matrix is already RAS.
+- Default spacing/origin/direction are `(1, 1, 1)`, `(0, 0, 0)`, and identity `eye(3)` if metadata is missing.
 
 ## Installation
 
@@ -80,7 +84,7 @@ If you are developing the module, place this repository where Slicer can load sc
 5. Adjust the **load plan** tree (NPZ or paired):
    - The tree **grows and shrinks with the module panel** (resize the splitter if needed); scroll when the list is long.
    - **Multi-select:** Ctrl or Shift + click to select several rows; toggling one **checkbox** applies the same checked/unchecked state to all other selected checkable rows (NPZ: top-level groups; paired: image and segmentation rows).
-   - In **NPZ** mode, also remap keys (data / spacing / origin / sparse fields) and add or remove plan groups as needed.
+   - In **NPZ** mode, also remap keys (data / spacing / origin / direction / sparse fields) and add or remove plan groups as needed.
 6. Click **Load** to import selected data item into the scene.
 7. Click **Close / Clear** to remove nodes loaded by the current file.
 
@@ -157,6 +161,5 @@ Please treat AI output as draft code: always verify correctness, safety, and mai
 - `CMakeLists.txt`: extension-level configuration.
 - `NpzLoader/CMakeLists.txt`: module packaging (scripts/resources/tests).
 - `NpzLoader/NpzLoader.py`: main module UI + loading logic.
-- `NpzLoader/SliceViewingTool.py`: custom slice interaction controller.
+- `NpzLoader/NpzLoaderLib/SliceViewingTool.py`: custom slice interaction controller.
 - `NpzLoader/Resources/UI/NpzLoader.ui`: Qt UI layout.
-

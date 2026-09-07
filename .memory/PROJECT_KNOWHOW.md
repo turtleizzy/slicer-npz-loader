@@ -9,20 +9,22 @@ A **scripted 3D Slicer extension** (`Informatics` → **NPZ Loader**) that loads
 - **Root** `CMakeLists.txt`: Slicer extension metadata; `add_subdirectory(NpzLoader)`.
 - **`NpzLoader/`**: single scripted module.
   - `NpzLoader.py`: module class, widget, `NpzLoaderLogic`, tests (`ScriptedLoadableModule*` pattern).
-  - `SliceViewingTool.py`: optional slice interaction helper (separate from load logic).
+  - `NpzLoaderLib/SliceViewingTool.py`: optional slice interaction helper (separate from load logic).
   - `Resources/UI/NpzLoader.ui`, `Resources/Icons/*.png`, `SliceViewingTool.svg`.
 - **`NpzLoader/CMakeLists.txt`**: `slicerMacroBuildScriptedModule` with `WITH_GENERIC_TESTS`; lists both Python scripts and resources.
 
 ## Data model (code)
 
-- **`KeyInfo`**: per-array name, shape, dtype, **role** (`volume`, `spacing`, `origin`, `seg_labelmap`, `seg_sparse_ind`, `seg_sparse_color`, `unknown`).
-- **`LoadPlanGroup`**: `group_type` ∈ `volume` | `seg_labelmap` | `seg_sparse`, `enabled`, **`mappings`** (which NPZ keys feed `data`, `spacing`, `origin`, or for sparse `ind` / `color_point`).
+- **`KeyInfo`**: per-array name, shape, dtype, **role** (`volume`, `spacing`, `origin`, `direction`, `seg_labelmap`, `seg_sparse_ind`, `seg_sparse_color`, `unknown`).
+- **`LoadPlanGroup`**: `group_type` ∈ `volume` | `seg_labelmap` | `seg_sparse`, `enabled`, **`mappings`** (which NPZ keys feed `data`, `spacing`, `origin`, and for volume/`seg_labelmap` also `direction`; for sparse `ind` / `color_point`).
 
 ## Axis and geometry (critical)
 
 - Voxel arrays are **NumPy `(z, y, x)`** (comments in code use K,J,I ↔ depth, height, width).
-- **`spacing` / `origin` in files are `(z, y, x)`**; logic reverses to **`(x, y, z)`** for Slicer (`_resolveSpacingOrigin`).
-- **`_applyGeometry`**: sets spacing, origin, and **`SetIJKToRASDirections`** via **`_IJK_DIRECTIONS_LPS_TO_RAS`** — assumes a **LPS-style** numpy grid mapped into Slicer’s **RAS** frame (negated I and J). Changing this matrix affects alignment with other DICOM/native Slicer data; test visually when touching geometry.
+- Unsuffixed **`spacing` / `origin` are `(z, y, x)`** and reversed to **`(x, y, z)`**. Keys named `spacing_xyz` / `origin_lps` / `origin_ras` (or an NPZ `convention` of `lps`/`ras`/`xyz`) are already xyz. **`origin_lps`** is converted to RAS `(-L,-P,S)`.
+- **`direction`** is an **ITK 3×3** (columns = I,J,K axes; SimpleITK `GetDirection()`), or length-9 flatten. Volume and **`seg_labelmap`** map keys named like `direction`. Missing direction defaults to **`np.eye(3)`**.
+- Provided direction is **LPS by default**. **`directionIsLPS`** converts with **`Slicer = diag(-1,-1,1) @ D_itk`**. Uncheck to treat `D` as RAS ITK (passed through).
+- **`_applyGeometry`**: sets spacing, RAS origin, and **`SetIJKToRASDirections`**. Changing this matrix affects alignment with NIfTI/DICOM; test visually when touching geometry.
 
 ## Analysis vs load
 
@@ -32,7 +34,7 @@ A **scripted 3D Slicer extension** (`Informatics` → **NPZ Loader**) that loads
 
 ## Classification (`NpzLoaderLogic._classifyKey`)
 
-Regex-driven: volume names `img|vol|volume|image` (3D); `spacing` / `origin` by substring; dense seg by `seg` in name (3D, dtype-agnostic: integer or float masks); sparse by `ind`/`inds` suffix `(N,3)` and optional `color_point(s)` 1D. Unknown 3D arrays can be promoted to a volume group in **`generateLoadPlan`** if no volume was found.
+Regex-driven: volume names `img|vol|volume|image` (3D); `spacing` / `origin` / `direction` by start-or-end substring (`direction` also requires shape `(3,3)` or `(9,)`); dense seg by `seg` in name or `label*` prefix (3D, dtype-agnostic: integer or float masks); sparse by `ind`/`inds` suffix `(N,3)` and optional `color_point(s)` 1D. Unknown 3D arrays can be promoted to a volume group in **`generateLoadPlan`** if no volume was found.
 
 ## Float dense seg handling
 
@@ -43,14 +45,14 @@ Regex-driven: volume names `img|vol|volume|image` (3D); `spacing` / `origin` by 
 
 ## Load plan and sticky reuse
 
-- **`generateLoadPlan`**: builds groups; pairs sparse `ind` with `color_*` by **stripped name prefix**; shares global `spacing`/`origin` keys when present.
+- **`generateLoadPlan`**: builds groups; pairs sparse `ind` with `color_*` by **stripped name prefix**; shares global `spacing`/`origin`/`direction` keys when present; volume and `seg_labelmap` groups map `direction` (or `(none)` → identity at load).
 - **`computeKeySignature`**: sorted comma-separated key names — used to **reuse** edited plans when “reuse plan” is on (`stickyPlans` dict on logic).
 
 ## Load pipeline (widget `onLoad`)
 
 1. Read tree → `_loadPlanGroups`; clear prior module nodes.
 2. **`loadFile`** once.
-3. **First pass**: all enabled **`volume`** groups → `loadVolume` (tracks first volume shape + raw z,y,x spacing/origin for segs).
+3. **First pass**: all enabled **`volume`** groups → `loadVolume` (tracks first volume shape + raw z,y,x spacing/origin + 3×3 direction for segs).
 4. **Second pass**: **`seg_labelmap`** and **`seg_sparse`** using that geometry when shapes match.
 
 ## Volume / segmentation implementation
@@ -116,6 +118,10 @@ Local Slicer installation/build path:
 - `/wr/Slicer-5.11.0-2025-11-17-linux-amd64/Slicer`
 
 When you need to test behavior or inspect Slicer APIs (python modules/classes, MRML helpers, segmentations/volumes logic, etc.), run/view them in this local Slicer environment first (for example, using its Python interpreter / ensuring matching versions).
+
+## 2026-09 volume direction in load plan
+
+Volume and **`seg_labelmap`** groups have a **`direction`** mapping. Missing direction defaults to identity **`eye(3)`**. Direction is **ITK column layout**; Settings checkbox **Treat direction matrix as LPS** applies `Slicer = diag(-1,-1,1) @ D`. Spacing/origin axis order is inferred from key names (`spacing_xyz`, `origin_lps`, …); LPS origins are converted to RAS. First loaded volume’s raw direction plus **already-converted** Slicer xyz spacing/origin are forwarded to segs when shapes match.
 
 ## 2026-03 data review expansion notes
 

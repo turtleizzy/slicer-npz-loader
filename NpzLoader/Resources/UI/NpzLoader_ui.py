@@ -240,6 +240,12 @@ class Ui_NpzLoader(object):
 
         self.settingsLayout.addWidget(self.autoShowSeg3DCheckBox)
 
+        self.directionIsLpsCheckBox = QCheckBox(self.settingsCollapsible)
+        self.directionIsLpsCheckBox.setObjectName(u"directionIsLpsCheckBox")
+        self.directionIsLpsCheckBox.setChecked(True)
+
+        self.settingsLayout.addWidget(self.directionIsLpsCheckBox)
+
         self.floatSegAutoThresholdCheckBox = QCheckBox(self.settingsCollapsible)
         self.floatSegAutoThresholdCheckBox.setObjectName(u"floatSegAutoThresholdCheckBox")
         self.floatSegAutoThresholdCheckBox.setChecked(True)
@@ -390,6 +396,10 @@ class Ui_NpzLoader(object):
         self.autoShowSeg3DCheckBox.setText(QCoreApplication.translate("NpzLoader", u"Automatically enable segmentation Show 3D after load", None))
 #if QT_CONFIG(tooltip)
         self.autoShowSeg3DCheckBox.setToolTip(QCoreApplication.translate("NpzLoader", u"When checked, loaded segmentations are shown in the 3D view (Segmentations module Show 3D). When unchecked, 3D visibility stays off.", None))
+#endif // QT_CONFIG(tooltip)
+        self.directionIsLpsCheckBox.setText(QCoreApplication.translate("NpzLoader", u"Treat direction matrix as LPS (convert to RAS)", None))
+#if QT_CONFIG(tooltip)
+        self.directionIsLpsCheckBox.setToolTip(QCoreApplication.translate("NpzLoader", u"NPZ direction is typically LPS (ITK/DICOM). When checked, it is converted to Slicer RAS by negating the first two axes (L→R, P→A). Uncheck if the matrix is already RAS.", None))
 #endif // QT_CONFIG(tooltip)
         self.floatSegAutoThresholdCheckBox.setText(QCoreApplication.translate("NpzLoader", u"Auto-convert float seg masks (0-1 -> threshold)", None))
         self.floatSegThresholdLabel.setText(QCoreApplication.translate("NpzLoader", u"Float seg threshold (0-1):", None))

@@ -244,6 +244,13 @@
        </widget>
       </item>
       <item>
+       <widget class="QCheckBox" name="directionIsLpsCheckBox">
+        <property name="text"><string>Treat direction matrix as LPS (convert to RAS)</string></property>
+        <property name="toolTip"><string>NPZ direction is typically LPS (ITK/DICOM). When checked, it is converted to Slicer RAS by negating the first two axes (L→R, P→A). Uncheck if the matrix is already RAS.</string></property>
+        <property name="checked"><bool>true</bool></property>
+       </widget>
+      </item>
+      <item>
        <widget class="QCheckBox" name="floatSegAutoThresholdCheckBox">
         <property name="text"><string>Auto-convert float seg masks (0-1 -> threshold)</string></property>
         <property name="checked"><bool>true</bool></property>

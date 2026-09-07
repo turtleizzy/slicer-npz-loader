@@ -14,7 +14,7 @@
 ## Safety and compatibility
 
 - Keep **`np.load(..., allow_pickle=False)`** for NPZ/NPY.
-- Be careful changing **`_applyGeometry`**, **`_resolveSpacingOrigin`**, or **`_IJK_DIRECTIONS_LPS_TO_RAS`** — they affect clinical alignment with the rest of the scene.
+- Be careful changing **`_applyGeometry`**, **`_resolveSpacingOrigin`**, **`_resolveDirection`**, or **`_directionsToSlicer`** — they affect clinical alignment with the rest of the scene. Direction is ITK 3×3 (columns = IJK axes), LPS by default: `Slicer = diag(-1,-1,1) @ D`. Unsuffixed spacing/origin stay `(z,y,x)`; `spacing_xyz` / `origin_lps` are xyz, with LPS origin flipped to RAS.
 
 ## After changes
 
